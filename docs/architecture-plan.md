@@ -3,7 +3,9 @@
 **WAIT** = Wiki Aware Intelligent Tool (full name spelled out once here; **WAIT** used
 throughout everywhere else, including the rest of this document).
 
-**Date:** 2026-08-27 · **Status:** decided, moving to build · **Supersedes:** all prior
+**Date:** 2026-08-27 (updated 2026-08-28 — §1.1/§4/§12/§15/§17 tightened to match issues #28/#31:
+Hermes has no public route; the proxy is the sole public boundary, enforcing exact-origin
+allowlisting, not a wildcard) · **Status:** decided, moving to build · **Supersedes:** all prior
 versions of this document
 
 ## Decision
@@ -29,6 +31,12 @@ the script content never leaves wikipedia.org. What remains cross-origin is only
 API calls from that on-wiki script out to WAIT's proxy (§12) — the same narrower,
 already-precedented pattern `gitlab-content` uses. Track the policy's status regardless (§16),
 but this is a materially safer starting point than assumed.
+
+**The proxy is the only component with a public route.** Hermes itself has no public ingress at
+all — it's an internal Toolforge continuous job (§4), reachable only from the proxy over
+Toolforge's internal service address. The browser never talks to anything but the proxy, which
+enforces exact-origin validation rather than a wildcard (§12) — narrower than earlier drafts of
+this plan assumed.
 
 - Read-only chat, text-only rendering (§9.2–9.3, unchanged).
 - Session/toolset: empty toolset (§5), backed by `llm-qwen36-27b`/`llm-qwen3-14b`.
@@ -62,11 +70,18 @@ Unchanged. Toolforge's default quota fits Hermes's measured footprint; Cloud VPS
 - Hermes's own Docker image can't run on Toolforge (Build Service is buildpack-only; the image
   needs `USER root` + `network_mode: host`). Doesn't block WAIT — `hermes gateway run` is
   one plain foreground process, confirmed running bare (non-root, no container) already.
+- **Hermes runs as an internal Toolforge continuous job, not a public webservice.** It's a
+  backend for the WAIT proxy, never a browser-facing endpoint — no public ingress route, no
+  browser-facing CORS configuration on Hermes itself. Reachable from the proxy only through
+  Toolforge's internal service address. The proxy (§12) is the only component with a public
+  route.
 - `dashboard` skipped. `cron.provider=builtin` runs all four maintenance workers in-process.
 - **Everything deploys on Toolforge** (confirmed) — including the proxy backend (§12), which,
   unlike Hermes's own image, has no Dockerfile/root/host-networking baggage and should build
   cleanly via Build Service as a plain Python or Node service.
 - `HERMES_HOME` on NFS-backed `/data/project/...`.
+- Both Hermes and the proxy read the same `API_SERVER_KEY` Toolforge envvar and fail closed if
+  it's absent — no silent fallback to an unauthenticated state.
 
 ## 5. Tool-calling handling (interactive tier)
 
@@ -241,6 +256,18 @@ server-side. Enforces the link allowlist (§9.4) and injection scan (§9.5) **se
 just in client JS — a client-side-only check is inspectable and bypassable, so defense belongs
 on the server that actually talks to the model.
 
+**Caller boundary: exact-origin allowlist, not a wildcard.** Browsers call the proxy, never
+Hermes directly — Hermes has no public route at all (§4). CORS and server-side `Origin`
+validation both live on the proxy. For MVP the only allowed origin is exactly
+`https://fr.wikipedia.org` — not `*` and not the pattern `*.wikipedia.org` used in earlier drafts
+of this plan. Add exact origins one at a time as wikis are onboarded (§10.4's composability
+work). This boundary is independent of Wikipedia login state and must not introduce OAuth or
+identity forwarding. `Origin` validation is a browser-caller boundary, not cryptographic client
+attestation — a custom non-browser client can forge the header; direct (non-browser) clients are
+simply unsupported, and requests without an allowed origin are rejected before any model work
+starts. Rate limiting (below) is a separate, independent abuse control, not a substitute for
+this check.
+
 - `POST /chat` — request: `{ message, session_id?, context?: { page_title?, page_lang? } }`.
   Response: `{ session_id, reply, links?: [{title, url}] }` — links returned as **structured,
   pre-validated data** (already filtered per §9.4), not raw text the client has to parse and
@@ -290,9 +317,10 @@ Composable, config-driven rather than a single hardcoded path — a list the pro
   the natural target, strengthening §8's auditability goal — a WMF-affiliated mirror is more
   discoverable/trusted within the movement than GitHub alone; confirm the exact GitLab target
   during setup).
-- **Everything deploys on Toolforge** (§4) — the Hermes gateway as a bare process via a
-  continuous-job-backed `webservice`, and the proxy backend (§12) via Build Service, since it
-  doesn't share Hermes's image constraints.
+- **Everything deploys on Toolforge** (§4) — the Hermes gateway as a bare process on an
+  **internal-only continuous job** (no public webservice, no public ingress — §4), and the proxy
+  backend (§12) via Build Service as the sole component with a public route, since it doesn't
+  share Hermes's image constraints.
 
 ## 16. Known risks (tracked, not blocking)
 
@@ -315,11 +343,15 @@ Composable, config-driven rather than a single hardcoded path — a list the pro
 ## 17. Build checklist
 
 1. First-boot init (non-root): scaffolding, seed config, generate `API_SERVER_KEY`, sync skills.
-2. Toolforge `webservice` running `hermes gateway run`, NFS `HERMES_HOME`,
-   `cron.provider=builtin` driving eval/watchdog/feedback/patch-proposer (§11).
-3. Proxy backend (§12) via Build Service: session minting, server-side link-allowlist +
-   injection-scan enforcement, rate limiting, degradation chain (§14).
-4. Interactive-tier session: empty toolset, LiftWing Qwen, CORS for `*.wikipedia.org`.
+2. Toolforge **internal continuous job** running `hermes gateway run` (no public webservice, no
+   public ingress — §4), NFS `HERMES_HOME`, `cron.provider=builtin` driving
+   eval/watchdog/feedback/patch-proposer (§11).
+3. Proxy backend (§12) via Build Service — the only publicly-reachable component: session
+   minting, server-side exact-origin allowlist + link-allowlist + injection-scan enforcement,
+   rate limiting, degradation chain (§14).
+4. Interactive-tier session: empty toolset, LiftWing Qwen. CORS/`Origin` enforcement lives on
+   the proxy (§12), exact-origin allowlist — MVP: `https://fr.wikipedia.org` only, not a
+   wildcard.
 5. On-wiki script (user subpage first): text-only rendering, calls only the proxy, never
    `api_server` directly.
 6. Eval suite (§11): benchmark cases across all four product capabilities (§10), including
