@@ -360,19 +360,28 @@ the default with a no-op or treat `gadget_assertion` as an ignored compatibility
 - **Service protection, not an end-user budget** (#22, decided — starting point, not measured;
   review after first sustained production traffic or within 2 weeks of Phase 4 launch, whichever
   is sooner):
-  - Deployment concurrency: `gunicorn --workers 2 --worker-class gthread --threads 16 --timeout
-    100 --graceful-timeout 30` (Procfile change tracked under #35's implementation, not made by
-    this ADR). `--workers 2` matches Toolforge's 2 vCPU default quota with no CPU oversubscription;
-    `gthread`/`--threads 16` gives I/O concurrency headroom for blocking upstream calls. Fixes a
-    real mismatch found while setting these numbers: the current Procfile sets no `--timeout`,
-    so gunicorn's 30s default would kill a worker mid-retry, since `HERMES_TIMEOUT_SECONDS`
-    defaults to 90s — `--timeout 100` gives that budget margin instead of racing it.
+  - Deployment concurrency: `gunicorn --workers 1 --worker-class gthread --threads 32 --timeout
+    100 --graceful-timeout 30`, implemented in #35. **Corrected from this ADR's original
+    `--workers 2` during #35's implementation:** the global in-flight cap below is an in-process
+    Python object (a condition-variable-guarded counter) — it is not shared across separate
+    gunicorn worker *processes*, only across threads within one process, and this MVP has no
+    external coordination store (Redis or similar) to make it cross-process. `--workers 2` would
+    have silently produced two independent caps of 8, i.e. 16 concurrent upstream calls overall,
+    not the global cap of 8 this issue decided. `--workers 1` trades a small amount of potential
+    CPU parallelism for correctness of the actual global-cap requirement — an acceptable trade
+    since this workload is I/O-bound (blocking on the Hermes/LiftWing HTTP call, which releases
+    the GIL) rather than CPU-bound. `gthread`/`--threads 32` keeps the same total raw connection
+    capacity as the original two-process plan (32 slots either way), comfortably above the
+    8-in-flight + 16-queued = 24 total. Also fixes a real mismatch found while setting these
+    numbers originally: the current Procfile sets no `--timeout`, so gunicorn's 30s default would
+    kill a worker mid-retry, since `HERMES_TIMEOUT_SECONDS` defaults to 90s — `--timeout 100`
+    gives that budget margin instead of racing it.
   - Global in-flight cap, independent of raw connection handling: an application-level admission
     semaphore of **8** concurrent upstream calls, protecting LiftWing's own latency curve (§3 —
     p50 ≈18s at concurrency 64) regardless of Toolforge's elevated quota.
   - Bounded wait queue: up to **16** additional requests may wait for a slot; beyond that,
     immediate structured `503` (`code: "overloaded"`, with `Retry-After`) rather than unbounded
-    queuing. (2 workers × 16 threads = 32 raw connection slots, comfortably above the
+    queuing. (1 worker × 32 threads = 32 raw connection slots, comfortably above the
     8-in-flight + 16-queued = 24 total, leaving slack for health checks and admission
     bookkeeping.)
   - Per-session burst cap: 30 requests/hour per proxy-minted session token — a guard against a

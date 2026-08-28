@@ -1,6 +1,8 @@
 import io
 import json
 import os
+import threading
+import time
 import unittest
 import urllib.error
 from unittest.mock import patch
@@ -8,9 +10,12 @@ from unittest.mock import patch
 from proxy.app import (
     MAX_UPSTREAM_BYTES,
     MEDIAWIKI_CODING_SAFETY_INSTRUCTION,
+    AdmissionGate,
     HermesClient,
     NoRedirectHandler,
     ProxyConfig,
+    RequestRejected,
+    SessionRateLimiter,
     UpstreamUnavailable,
     create_application,
     extract_wiki_links,
@@ -332,6 +337,136 @@ class ProxyApplicationTest(unittest.TestCase):
         self.assertEqual(second["json"]["session_id"], session_token)
         self.assertEqual(client.calls[0][1:], client.calls[1][1:])
         self.assertNotIn(session_token, client.calls[0][1:])
+
+    def test_saturated_admission_gate_rejects_with_structured_overloaded_error(self):
+        client = RecordingHermesClient()
+        gate = AdmissionGate(max_in_flight=1, max_queued=0)
+        application = create_application(
+            self.config,
+            client,
+            verify_attestation=lambda environ, body: None,
+            admission_gate=gate,
+        )
+
+        with gate.admit():
+            response = self.request(
+                application,
+                "POST",
+                "/chat",
+                {"message": "Question", "gadget_assertion": "test-only"},
+            )
+
+        self.assertEqual(response["status"], "503 Service Unavailable")
+        self.assertEqual(response["json"]["error"]["code"], "overloaded")
+        self.assertEqual(response["headers"]["Retry-After"], "5")
+        self.assertEqual(client.calls, [])
+
+    def test_successful_chat_exposes_queue_wait_time_readable_by_browser_js(self):
+        response = self.request(
+            self.attested_application(),
+            "POST",
+            "/chat",
+            {"message": "Question"},
+        )
+
+        self.assertIn("Server-Timing", response["headers"])
+        self.assertRegex(response["headers"]["Server-Timing"], r"^queue;dur=\d")
+        self.assertIn(
+            "Server-Timing",
+            response["headers"]["Access-Control-Expose-Headers"],
+        )
+        self.assertIn(
+            "Retry-After",
+            response["headers"]["Access-Control-Expose-Headers"],
+        )
+
+    def test_admission_gate_releases_its_slot_after_a_completed_request(self):
+        client = RecordingHermesClient()
+        gate = AdmissionGate(max_in_flight=1, max_queued=0)
+        application = create_application(
+            self.config,
+            client,
+            verify_attestation=lambda environ, body: None,
+            admission_gate=gate,
+        )
+
+        first = self.request(
+            application,
+            "POST",
+            "/chat",
+            {"message": "Question", "gadget_assertion": "test-only"},
+        )
+        second = self.request(
+            application,
+            "POST",
+            "/chat",
+            {"message": "Question", "gadget_assertion": "test-only"},
+        )
+
+        self.assertEqual(first["status"], "200 OK")
+        self.assertEqual(second["status"], "200 OK")
+        self.assertEqual(len(client.calls), 2)
+
+    def test_session_over_its_burst_cap_is_rejected_before_consuming_upstream_capacity(
+        self,
+    ):
+        client = RecordingHermesClient()
+        limiter = SessionRateLimiter(max_requests=1, window_seconds=3600)
+        application = create_application(
+            self.config,
+            client,
+            verify_attestation=lambda environ, body: None,
+            session_rate_limiter=limiter,
+        )
+        session_token = "c" * 43
+        body = {
+            "message": "Question",
+            "gadget_assertion": "test-only",
+            "session_id": session_token,
+        }
+
+        first = self.request(application, "POST", "/chat", body)
+        second = self.request(application, "POST", "/chat", body)
+
+        self.assertEqual(first["status"], "200 OK")
+        self.assertEqual(second["status"], "429 Too Many Requests")
+        self.assertEqual(second["json"]["error"]["code"], "rate_limited")
+        self.assertIn("Retry-After", second["headers"])
+        self.assertEqual(len(client.calls), 1)
+
+    def test_session_burst_cap_is_scoped_per_session_not_global(self):
+        client = RecordingHermesClient()
+        limiter = SessionRateLimiter(max_requests=1, window_seconds=3600)
+        application = create_application(
+            self.config,
+            client,
+            verify_attestation=lambda environ, body: None,
+            session_rate_limiter=limiter,
+        )
+
+        first = self.request(
+            application,
+            "POST",
+            "/chat",
+            {
+                "message": "Question",
+                "gadget_assertion": "test-only",
+                "session_id": "d" * 43,
+            },
+        )
+        second = self.request(
+            application,
+            "POST",
+            "/chat",
+            {
+                "message": "Question",
+                "gadget_assertion": "test-only",
+                "session_id": "e" * 43,
+            },
+        )
+
+        self.assertEqual(first["status"], "200 OK")
+        self.assertEqual(second["status"], "200 OK")
 
     def test_attested_chat_forwards_complete_alternating_history(self):
         client = RecordingHermesClient()
@@ -885,6 +1020,126 @@ class ExtractWikiLinksTest(unittest.TestCase):
                 self.assertEqual(
                     extract_wiki_links(url), [{"title": "Article", "url": url}]
                 )
+
+
+class AdmissionGateTest(unittest.TestCase):
+    def test_admits_up_to_the_in_flight_ceiling(self):
+        gate = AdmissionGate(max_in_flight=2, max_queued=0)
+
+        with gate.admit(), gate.admit():
+            self.assertEqual(gate._in_flight, 2)
+
+    def test_rejects_immediately_once_in_flight_and_queue_are_both_full(self):
+        gate = AdmissionGate(max_in_flight=1, max_queued=0)
+
+        with gate.admit():
+            with self.assertRaises(RequestRejected) as raised:
+                with gate.admit():
+                    pass
+
+        self.assertEqual(raised.exception.status, "503 Service Unavailable")
+        self.assertEqual(raised.exception.code, "overloaded")
+        self.assertEqual(raised.exception.retry_after_seconds, 5.0)
+
+    def test_a_queued_admit_proceeds_once_the_holder_releases_its_slot(self):
+        gate = AdmissionGate(max_in_flight=1, max_queued=1)
+        holder_ready = threading.Event()
+        release_holder = threading.Event()
+        queued_admitted = threading.Event()
+
+        def hold():
+            with gate.admit():
+                holder_ready.set()
+                release_holder.wait(timeout=5)
+
+        def queue_and_admit():
+            holder_ready.wait(timeout=5)
+            with gate.admit():
+                queued_admitted.set()
+
+        holder_thread = threading.Thread(target=hold)
+        queued_thread = threading.Thread(target=queue_and_admit)
+        holder_thread.start()
+        queued_thread.start()
+        holder_ready.wait(timeout=5)
+        # Give the queued thread a moment to actually reach the wait() call before releasing —
+        # otherwise this test could pass even if queuing were broken, by pure scheduling luck.
+        time.sleep(0.05)
+        release_holder.set()
+        holder_thread.join(timeout=5)
+        queued_thread.join(timeout=5)
+
+        self.assertTrue(queued_admitted.is_set())
+        self.assertEqual(gate._in_flight, 0)
+        self.assertEqual(gate._queued, 0)
+
+    def test_slot_is_released_even_when_the_admitted_block_raises(self):
+        gate = AdmissionGate(max_in_flight=1, max_queued=0)
+
+        with self.assertRaises(ValueError):
+            with gate.admit():
+                raise ValueError("boom")
+
+        self.assertEqual(gate._in_flight, 0)
+        with gate.admit():
+            self.assertEqual(gate._in_flight, 1)
+
+
+class SessionRateLimiterTest(unittest.TestCase):
+    def test_allows_up_to_the_configured_ceiling_within_the_window(self):
+        limiter = SessionRateLimiter(max_requests=2, window_seconds=3600)
+
+        first_allowed, _ = limiter.check("session-a")
+        second_allowed, _ = limiter.check("session-a")
+        third_allowed, retry_after = limiter.check("session-a")
+
+        self.assertTrue(first_allowed)
+        self.assertTrue(second_allowed)
+        self.assertFalse(third_allowed)
+        self.assertGreater(retry_after, 0)
+
+    def test_tracks_each_session_independently(self):
+        limiter = SessionRateLimiter(max_requests=1, window_seconds=3600)
+
+        allowed_a, _ = limiter.check("session-a")
+        allowed_b, _ = limiter.check("session-b")
+
+        self.assertTrue(allowed_a)
+        self.assertTrue(allowed_b)
+
+    def test_requests_age_out_of_the_sliding_window(self):
+        clock = [0.0]
+        limiter = SessionRateLimiter(
+            max_requests=1, window_seconds=10, time_source=lambda: clock[0]
+        )
+
+        first_allowed, _ = limiter.check("session-a")
+        clock[0] = 5.0
+        blocked, retry_after = limiter.check("session-a")
+        clock[0] = 10.1
+        allowed_again, _ = limiter.check("session-a")
+
+        self.assertTrue(first_allowed)
+        self.assertFalse(blocked)
+        self.assertAlmostEqual(retry_after, 5.0, places=3)
+        self.assertTrue(allowed_again)
+
+    def test_sweep_evicts_a_session_with_no_timestamps_left_in_the_window(self):
+        clock = [0.0]
+        limiter = SessionRateLimiter(
+            max_requests=1,
+            window_seconds=10,
+            sweep_interval_seconds=20,
+            time_source=lambda: clock[0],
+        )
+
+        limiter.check("stale-session")
+        self.assertIn("stale-session", limiter._requests)
+
+        clock[0] = 25.0
+        limiter.check("other-session")
+
+        self.assertNotIn("stale-session", limiter._requests)
 
 
 if __name__ == "__main__":

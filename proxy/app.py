@@ -6,11 +6,13 @@ import json
 import os
 import re
 import secrets
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 MAX_REQUEST_BYTES = 65_536
@@ -22,6 +24,18 @@ MEDIAWIKI_CODING_SAFETY_INSTRUCTION = (
     "or weakening CSRF token handling, origin checks, or permission checks."
 )
 SESSION_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
+# Architecture §12, decided in #22. Global (per proxy process — see Procfile's `--workers 1`;
+# a global cap needs a single process, since a plain in-process semaphore isn't shared across
+# gunicorn worker processes and this MVP has no external coordination store to make it so),
+# independent of gunicorn's own raw connection/thread handling.
+MAX_IN_FLIGHT_UPSTREAM_CALLS = 8
+MAX_QUEUED_UPSTREAM_CALLS = 16
+OVERLOADED_RETRY_AFTER_SECONDS = 5.0
+# Accident guard against a buggy/looping client, not a real abuse control — the session token
+# is trivially resettable client-side, so it can't be treated as identity (§12, #22).
+SESSION_RATE_LIMIT_MAX_REQUESTS = 30
+SESSION_RATE_LIMIT_WINDOW_SECONDS = 3600.0
+SESSION_RATE_LIMIT_SWEEP_INTERVAL_SECONDS = 60.0
 StartResponse = Callable[[str, list[tuple[str, str]]], object]
 AttestationVerifier = Callable[[Mapping[str, object], Mapping[str, object]], None]
 
@@ -113,11 +127,18 @@ def extract_wiki_links(reply_text: str) -> list[dict[str, str]]:
 
 
 class RequestRejected(Exception):
-    def __init__(self, status: str, code: str, message: str):
+    def __init__(
+        self,
+        status: str,
+        code: str,
+        message: str,
+        retry_after_seconds: float | None = None,
+    ):
         super().__init__(message)
         self.status = status
         self.code = code
         self.message = message
+        self.retry_after_seconds = retry_after_seconds
 
 
 class UpstreamUnavailable(Exception):
@@ -309,16 +330,114 @@ def reject_unconfigured_attestation(
     )
 
 
+class AdmissionGate:
+    def __init__(self, max_in_flight: int, max_queued: int):
+        self._max_in_flight = max_in_flight
+        self._max_queued = max_queued
+        self._condition = threading.Condition()
+        self._in_flight = 0
+        self._queued = 0
+
+    @contextmanager
+    def admit(self) -> Iterator[float]:
+        wait_started = time.monotonic()
+        with self._condition:
+            if self._in_flight >= self._max_in_flight:
+                if self._queued >= self._max_queued:
+                    raise RequestRejected(
+                        "503 Service Unavailable",
+                        "overloaded",
+                        "The assistant is at capacity, please retry shortly",
+                        retry_after_seconds=OVERLOADED_RETRY_AFTER_SECONDS,
+                    )
+                self._queued += 1
+                try:
+                    while self._in_flight >= self._max_in_flight:
+                        self._condition.wait()
+                finally:
+                    self._queued -= 1
+            self._in_flight += 1
+        try:
+            yield time.monotonic() - wait_started
+        finally:
+            with self._condition:
+                self._in_flight -= 1
+                self._condition.notify()
+
+
+class SessionRateLimiter:
+    def __init__(
+        self,
+        max_requests: int,
+        window_seconds: float,
+        sweep_interval_seconds: float = SESSION_RATE_LIMIT_SWEEP_INTERVAL_SECONDS,
+        time_source: Callable[[], float] = time.monotonic,
+    ):
+        self._max_requests = max_requests
+        self._window_seconds = window_seconds
+        self._sweep_interval_seconds = sweep_interval_seconds
+        self._time_source = time_source
+        self._lock = threading.Lock()
+        self._requests: dict[str, list[float]] = {}
+        self._next_sweep_at = time_source() + sweep_interval_seconds
+
+    def check(self, session_token: str) -> tuple[bool, float]:
+        now = self._time_source()
+        cutoff = now - self._window_seconds
+        with self._lock:
+            self._sweep_if_due(now, cutoff)
+            timestamps = [
+                t for t in self._requests.get(session_token, ()) if t > cutoff
+            ]
+            allowed = len(timestamps) < self._max_requests
+            if allowed:
+                timestamps.append(now)
+                retry_after_seconds = 0.0
+            else:
+                retry_after_seconds = max(
+                    0.0, timestamps[0] + self._window_seconds - now
+                )
+            if timestamps:
+                self._requests[session_token] = timestamps
+            else:
+                self._requests.pop(session_token, None)
+            return allowed, retry_after_seconds
+
+    def _sweep_if_due(self, now: float, cutoff: float) -> None:
+        # Bounds memory to recently active sessions rather than every distinct opaque session
+        # token ever minted over this process's lifetime — an abandoned session's single stale
+        # timestamp would otherwise never get pruned, since pruning normally only happens when
+        # that exact token is checked again.
+        if now < self._next_sweep_at:
+            return
+        self._next_sweep_at = now + self._sweep_interval_seconds
+        stale_tokens = [
+            token
+            for token, timestamps in self._requests.items()
+            if not any(t > cutoff for t in timestamps)
+        ]
+        for token in stale_tokens:
+            del self._requests[token]
+
+
 class ProxyApplication:
     def __init__(
         self,
         config: ProxyConfig,
         hermes_client: HermesClient,
         verify_attestation: AttestationVerifier,
+        admission_gate: AdmissionGate | None = None,
+        session_rate_limiter: SessionRateLimiter | None = None,
     ):
         self._config = config
         self._hermes_client = hermes_client
         self._verify_attestation = verify_attestation
+        self._admission_gate = admission_gate or AdmissionGate(
+            MAX_IN_FLIGHT_UPSTREAM_CALLS, MAX_QUEUED_UPSTREAM_CALLS
+        )
+        self._session_rate_limiter = session_rate_limiter or SessionRateLimiter(
+            SESSION_RATE_LIMIT_MAX_REQUESTS, SESSION_RATE_LIMIT_WINDOW_SECONDS
+        )
 
     def __call__(
         self, environ: Mapping[str, object], start_response: StartResponse
@@ -326,11 +445,14 @@ class ProxyApplication:
         try:
             return self._dispatch(environ, start_response)
         except RequestRejected as error:
+            headers = list(self._cors_response_headers(environ))
+            if error.retry_after_seconds is not None:
+                headers.append(("Retry-After", str(int(error.retry_after_seconds))))
             return self._json_response(
                 start_response,
                 error.status,
                 {"error": {"code": error.code, "message": error.message}},
-                self._cors_response_headers(environ),
+                headers,
             )
         except UpstreamUnavailable:
             return self._json_response(
@@ -387,12 +509,22 @@ class ProxyApplication:
                 "400 Bad Request", "invalid_session", "session_id is invalid"
             )
 
+        allowed, retry_after_seconds = self._session_rate_limiter.check(session_token)
+        if not allowed:
+            raise RequestRejected(
+                "429 Too Many Requests",
+                "rate_limited",
+                "Too many requests for this session",
+                retry_after_seconds=retry_after_seconds,
+            )
+
         hermes_session_id = self._derive_session_value("transcript", session_token)
         hermes_session_key = self._derive_session_value("memory", session_token)
         messages = (*history, {"role": "user", "content": message.strip()})
-        reply = self._hermes_client.chat(
-            messages, hermes_session_id, hermes_session_key
-        )
+        with self._admission_gate.admit() as queue_wait_seconds:
+            reply = self._hermes_client.chat(
+                messages, hermes_session_id, hermes_session_key
+            )
         return self._json_response(
             start_response,
             "200 OK",
@@ -401,7 +533,10 @@ class ProxyApplication:
                 "reply": reply,
                 "links": extract_wiki_links(reply),
             },
-            self._cors_response_headers(environ),
+            [
+                *self._cors_response_headers(environ),
+                ("Server-Timing", f"queue;dur={queue_wait_seconds * 1000:.3f}"),
+            ],
         )
 
     def _validate_browser_request(self, environ: Mapping[str, object]) -> None:
@@ -546,6 +681,13 @@ class ProxyApplication:
                     ("Access-Control-Allow-Headers", "Content-Type"),
                 ]
             )
+        else:
+            # Custom response headers are invisible to browser JS unless explicitly exposed —
+            # without this, Retry-After/Server-Timing are set on the wire but unreadable by the
+            # gadget's fetch() call, silently defeating the point of setting them.
+            headers.append(
+                ("Access-Control-Expose-Headers", "Retry-After, Server-Timing")
+            )
         return headers
 
     def _derive_session_value(self, purpose: str, session_token: str) -> str:
@@ -596,10 +738,14 @@ def create_application(
     config: ProxyConfig | None = None,
     hermes_client: HermesClient | None = None,
     verify_attestation: AttestationVerifier | None = None,
+    admission_gate: AdmissionGate | None = None,
+    session_rate_limiter: SessionRateLimiter | None = None,
 ) -> ProxyApplication:
     resolved_config = config or ProxyConfig.from_environment()
     return ProxyApplication(
         resolved_config,
         hermes_client or HermesClient(resolved_config),
         verify_attestation or reject_unconfigured_attestation,
+        admission_gate,
+        session_rate_limiter,
     )
