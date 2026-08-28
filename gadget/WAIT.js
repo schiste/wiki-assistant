@@ -40,6 +40,21 @@ function parseReplySegments(replyText) {
   return segments;
 }
 
+function isSafeHttpsUrl(rawUrl) {
+  // Parse and check the actual scheme — never a substring/prefix check (the exact class of
+  // bug architecture §9.4 warns about for the server-side allowlist applies here too: a naive
+  // check can be bypassed in ways a real URL parse cannot). This is client-side defense in
+  // depth: the server-side allowlist (#33) is the authoritative check, but the gadget must not
+  // blindly trust an unvalidated href into the DOM regardless of what the server is supposed
+  // to have already filtered — a `javascript:`/`data:` URL slipping through anywhere upstream
+  // must still not become clickable here.
+  try {
+    return new URL(rawUrl).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 function buildLinkDescriptors(links) {
   if (!Array.isArray(links)) {
     return [];
@@ -51,7 +66,8 @@ function buildLinkDescriptors(links) {
       link &&
       typeof link.url === "string" &&
       typeof link.title === "string" &&
-      link.title.length > 0
+      link.title.length > 0 &&
+      isSafeHttpsUrl(link.url)
     ) {
       descriptors.push({ title: link.title, url: link.url });
     }
@@ -128,6 +144,7 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     parseReplySegments: parseReplySegments,
     buildLinkDescriptors: buildLinkDescriptors,
+    isSafeHttpsUrl: isSafeHttpsUrl,
     renderReply: renderReply,
     renderReplySegments: renderReplySegments,
     renderLinks: renderLinks,

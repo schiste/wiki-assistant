@@ -3,6 +3,7 @@ const assert = require("node:assert");
 const {
   parseReplySegments,
   buildLinkDescriptors,
+  isSafeHttpsUrl,
   renderReply,
   CODE_DISCLAIMER_TEXT,
 } = require("./WAIT.js");
@@ -142,6 +143,63 @@ test("buildLinkDescriptors: filters out entries missing a title or url", () => {
 test("buildLinkDescriptors: non-array input returns an empty list", () => {
   assert.deepStrictEqual(buildLinkDescriptors(undefined), []);
   assert.deepStrictEqual(buildLinkDescriptors(null), []);
+});
+
+test("isSafeHttpsUrl: accepts a well-formed https URL", () => {
+  assert.strictEqual(
+    isSafeHttpsUrl("https://fr.wikipedia.org/wiki/Article"),
+    true,
+  );
+});
+
+test("isSafeHttpsUrl: rejects javascript: URLs", () => {
+  assert.strictEqual(isSafeHttpsUrl("javascript:alert(1)"), false);
+});
+
+test("isSafeHttpsUrl: rejects data: URLs", () => {
+  assert.strictEqual(
+    isSafeHttpsUrl("data:text/html,<script>alert(1)</script>"),
+    false,
+  );
+});
+
+test("isSafeHttpsUrl: rejects plain http (not https)", () => {
+  assert.strictEqual(
+    isSafeHttpsUrl("http://fr.wikipedia.org/wiki/Article"),
+    false,
+  );
+});
+
+test("isSafeHttpsUrl: rejects a value that fails to parse as a URL at all", () => {
+  assert.strictEqual(isSafeHttpsUrl("not a url"), false);
+  assert.strictEqual(isSafeHttpsUrl(""), false);
+});
+
+test("buildLinkDescriptors: drops entries whose URL is not https", () => {
+  const descriptors = buildLinkDescriptors([
+    { title: "Safe", url: "https://fr.wikipedia.org/wiki/Safe" },
+    { title: "Malicious", url: "javascript:alert(document.cookie)" },
+    {
+      title: "Also malicious",
+      url: "data:text/html,<script>alert(1)</script>",
+    },
+  ]);
+
+  assert.deepStrictEqual(descriptors, [
+    { title: "Safe", url: "https://fr.wikipedia.org/wiki/Safe" },
+  ]);
+});
+
+test("renderReply: a javascript: URL never becomes a clickable anchor href", () => {
+  const doc = createFakeDocument();
+  const container = doc.createElement("div");
+
+  renderReply(doc, container, {
+    reply: "click below",
+    links: [{ title: "Looks safe", url: "javascript:alert(document.cookie)" }],
+  });
+
+  assert.strictEqual(findByTag(container, "a").length, 0);
 });
 
 test("renderReply: a script-tag-looking reply renders as inert literal text, never HTML", () => {
