@@ -71,6 +71,7 @@ No dependency between them — both are external, one-off setup actions.
 | #21 BYK provider/model decision | #26 license-split confirmation |
 | #24 BAG/BRFA timing decision | |
 | #61 draft `gates.toml` *(after #16)* | |
+| #62 patch-proposer trigger & credential model — **blocks #54/#56 in Phase 7**, keep scheduling disabled until resolved | |
 
 **Sequencing:** #17 strictly after #16 (same lane). #61 strictly after #16. #15 should start once
 #14's lint/format tool choices are settled — light cross-lane handoff, not a hard block (both
@@ -138,7 +139,9 @@ Small phase — 2/1 is the natural balance, not forced.
 
 **Sequencing:** #54 needs #53's secret to actually test against a real model; #55 needs it too —
 land #53 first, or stub/mock it briefly so both lanes can build their logic before the real key
-exists.
+exists. **#54 and #56 are also blocked on #62** (Phase 1's patch-proposer trigger/credential
+decision) — don't start either until that ADR is recorded, and keep scheduling disabled per
+#62's acceptance criteria until it resolves.
 
 ### Phase 8 — Multi-wiki onboarding & gadget graduation (4 issues — V1 done here)
 | Lane A | Lane B |
