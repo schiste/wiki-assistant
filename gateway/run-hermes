@@ -3,4 +3,5 @@ set -eu
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 python3 "$script_dir/verify_interactive_toolset.py"
+python3 "$script_dir/verify_api_server_key.py"
 exec hermes gateway run "$@"

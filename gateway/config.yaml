@@ -2,3 +2,9 @@ platform_toolsets:
   api_server:
     # An empty list still inherits globally enabled MCP servers in pinned Hermes.
     - no_mcp
+
+# No `cron:` section: Hermes's cron.provider defaults to "" (empty string), which selects the
+# built-in in-process 60s ticker — not the external Chronos/NAS-mediated scheduler. There is no
+# literal "builtin" value to set; leaving this key absent IS the decision (verified against
+# hermes_cli/config_defaults.py). Architecture §4/§11 shorthand "cron.provider=builtin" refers
+# to this default, not a config value to write.

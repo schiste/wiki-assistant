@@ -1,0 +1,69 @@
+#!/bin/sh
+# First-boot init (#27): directory scaffolding, first-boot config seeding, required-secret
+# validation, bundled-skills sync. Non-root by design — Toolforge containers already run as
+# the tool account; none of this needs privilege escalation (architecture §4).
+#
+# Idempotent: safe to run on every boot, not just the first. Config seeding only ever writes a
+# file that doesn't already exist; directory creation is a no-op once the tree exists.
+set -eu
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+: "${HERMES_HOME:?HERMES_HOME must be set (NFS-backed /data/project/... on Toolforge)}"
+
+# --- Directory scaffolding ---
+# Exact list verified against Hermes's own docker/stage2-hook.sh (as_hermes mkdir -p block) —
+# kept in sync deliberately, not reinvented.
+mkdir -p \
+    "$HERMES_HOME/backups" \
+    "$HERMES_HOME/cron" \
+    "$HERMES_HOME/sessions" \
+    "$HERMES_HOME/logs" \
+    "$HERMES_HOME/logs/gateways" \
+    "$HERMES_HOME/hooks" \
+    "$HERMES_HOME/memories" \
+    "$HERMES_HOME/skills" \
+    "$HERMES_HOME/skins" \
+    "$HERMES_HOME/plans" \
+    "$HERMES_HOME/workspace" \
+    "$HERMES_HOME/home" \
+    "$HERMES_HOME/pairing" \
+    "$HERMES_HOME/platforms/pairing" \
+    "$HERMES_HOME/lazy-packages"
+
+# --- Required-secret validation ---
+# Fails closed here too, before any config seeding proceeds — same check the gateway process
+# itself runs at startup (gateway/verify_api_server_key.py), so a misconfigured environment is
+# caught at init time, not silently deferred to the first real request.
+python3 "$script_dir/verify_api_server_key.py"
+
+# --- First-boot config seeding ---
+# HERMES_INSTALL_DIR: where Hermes's own bundled example files
+# (.env.example, cli-config.yaml.example, docker/SOUL.md) live in this deployment. Deliberately
+# not hardcoded — Hermes's install layout on Toolforge is not yet decided (depends on how the
+# gateway is built/deployed, tracked separately). When unset, seeding is skipped with a clear
+# message rather than guessing a path; directory scaffolding and key validation above still run.
+if [ -n "${HERMES_INSTALL_DIR:-}" ]; then
+    seed_one() {
+        dest_name="$1"
+        src_name="$2"
+        dest_path="$HERMES_HOME/$dest_name"
+        src_path="$HERMES_INSTALL_DIR/$src_name"
+        if [ ! -f "$dest_path" ] && [ -f "$src_path" ]; then
+            cp "$src_path" "$dest_path"
+        fi
+    }
+    seed_one ".env" ".env.example"
+    seed_one "config.yaml" "cli-config.yaml.example"
+    seed_one "SOUL.md" "docker/SOUL.md"
+else
+    echo "init: HERMES_INSTALL_DIR not set — skipping first-boot config seeding" >&2
+fi
+
+# --- Bundled skills sync ---
+# Hermes's own tools/skills_sync.py self-resolves HERMES_HOME and the bundled skills source
+# from the ambient Hermes install; no arguments needed. Requires Hermes to be importable in
+# this process's Python environment (same requirement as the verify scripts above).
+python3 -m tools.skills_sync
+
+echo "init: complete"
