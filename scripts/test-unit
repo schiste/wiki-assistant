@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+echo "Running Python unit tests"
+if [ -d tests ]; then
+  python3 -m unittest discover -s tests -p 'test_*.py'
+else
+  echo "No Python unit tests configured yet"
+fi
+
+echo "Running JavaScript unit tests"
+node --test

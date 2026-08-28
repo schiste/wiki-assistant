@@ -1,0 +1,59 @@
+minimum_pre_commit_version: "4.0.0"
+default_install_hook_types: [pre-commit, pre-push]
+default_stages: [pre-commit]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        stages: [pre-commit]
+      - id: end-of-file-fixer
+        stages: [pre-commit]
+      - id: check-yaml
+        stages: [pre-commit]
+      - id: check-json
+        stages: [pre-commit]
+      - id: check-merge-conflict
+        stages: [pre-commit]
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+        stages: [pre-commit]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.5
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+        files: ^(eval|gateway|proxy)/.*\.py$
+        stages: [pre-commit]
+      - id: ruff-format
+        files: ^(eval|gateway|proxy)/.*\.py$
+        stages: [pre-commit]
+
+  - repo: https://github.com/pre-commit/mirrors-eslint
+    rev: v10.9.1
+    hooks:
+      - id: eslint
+        files: ^gadget/.*\.(cjs|js|mjs)$
+        stages: [pre-commit]
+
+  - repo: https://github.com/rbubley/mirrors-prettier
+    rev: v3.9.6
+    hooks:
+      - id: prettier
+        files: ^gadget/.*\.(cjs|css|js|mjs)$
+        stages: [pre-commit]
+
+  - repo: local
+    hooks:
+      - id: pre-push
+        name: fast unit tests and final lint
+        entry: ./scripts/pre-push
+        language: script
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

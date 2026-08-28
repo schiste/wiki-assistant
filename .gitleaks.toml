@@ -1,0 +1,17 @@
+title = "WAIT"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Generated dependency, cache, report, and build output."
+paths = [
+  '''^\.venv/''',
+  '''^node_modules/''',
+  '''^\.pytest_cache/''',
+  '''^\.ruff_cache/''',
+  '''^playwright-report/''',
+  '''^test-results/''',
+  '''^dist/''',
+  '''^build/''',
+]

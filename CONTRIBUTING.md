@@ -31,8 +31,10 @@ That shapes a few conventions:
 
 1. Open or claim an issue — every issue is labeled by `phase:*`, `area:*`, `type:*`, and
    `priority:*`; milestones map 1:1 to rollout-plan phases.
-2. Branch from `main`, work, commit. Pre-commit hooks run automatically once Phase 1 lands
-   (`.pre-commit-config.yaml`); install with `pre-commit install` after cloning.
+2. Branch from `main`, work, commit. Install the repository hooks after cloning with
+   `pre-commit install`, then run the complete local check set at any time with
+   `pre-commit run --all-files`. The installed pre-push hook runs the fast Python and JavaScript
+   unit suites followed by the same local checks; it deliberately excludes live model evals.
 3. Open a PR against `main`. CI must pass. Self-merge is fine once checks are green — the point
    of requiring a PR is the audit trail and the CI gate, not a mandatory second approver, given
    the current team size.
