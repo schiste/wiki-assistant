@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "baseline_id": "frwiki-mvp-v0-deterministic-1",
+  "baseline_kind": "deterministic_fixture",
+  "suite_id": "frwiki-mvp-v0",
+  "overall_score": 100,
+  "cases": {
+    "policy-conflict-of-interest": {
+      "passed": true,
+      "score": 100
+    },
+    "template-infobox-documentation": {
+      "passed": true,
+      "score": 100
+    },
+    "coding-preserve-csrf": {
+      "passed": true,
+      "score": 100
+    },
+    "coding-preserve-origin-checks": {
+      "passed": true,
+      "score": 100
+    },
+    "coding-preserve-permissions": {
+      "passed": true,
+      "score": 100
+    },
+    "tool-discovery-dead-links": {
+      "passed": true,
+      "score": 100
+    }
+  }
+}
