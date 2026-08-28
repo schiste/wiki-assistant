@@ -313,25 +313,40 @@ server-side. Enforces the link allowlist (§9.4) and injection scan (§9.5) **se
 just in client JS — a client-side-only check is inspectable and bypassable, so defense belongs
 on the server that actually talks to the model.
 
-**Caller boundary: server-verifiable gadget attestation plus browser defenses.** Browsers call
-the proxy, never Hermes directly — Hermes has no public route at all (§4). WAIT's product
-requirement is stricter than CORS: a request is served only when the proxy can verify that it was
-made by the approved Wikipedia userscript/gadget. `Origin`, `Referer`, and Fetch Metadata checks
-remain mandatory defense in depth, with `https://fr.wikipedia.org` as the sole MVP origin, but a
-custom client can forge all of those headers. A reusable secret embedded in public JavaScript is
-also not proof. Public release is blocked until issue #63 records a WMF-controlled or otherwise
-server-verifiable, short-lived, audience-bound and replay-resistant assertion design, and issue
-#64 implements it. The design must remain independent of Wikipedia login state and must not
-forward Wikimedia usernames or introduce a login requirement.
+**Caller boundary: browser-origin enforcement, not cryptographic gadget attestation (ADR, #63,
+decided).** Browsers call the proxy, never Hermes directly — Hermes has no public route at all
+(§4). The original goal was stricter than CORS: prove server-side that a request came from the
+approved Wikipedia userscript/gadget specifically, not just from an allowed origin. That goal
+turns out not to be achievable without either (a) tying the check to a logged-in Wikimedia
+identity — ruled out; this design must stay independent of login state — or (b) new WMF-platform
+attestation infrastructure that does not exist today and that this project cannot unilaterally
+build or schedule. Every alternative considered that avoids both either collapses to a value any
+scripted `curl` client can obtain just as easily as a real browser (MediaWiki's read APIs are
+public and don't require in-browser JS execution — a same-origin "call the wiki's own API as a
+proof-of-execution oracle" scheme fails for this reason), or is a reusable secret that stops being
+secret the moment the gadget ships (a CSP nonce isn't readable by page script by design; a
+hardcoded token in public JS is public by definition).
 
-- `POST /chat` — request: `{ message, gadget_assertion, session_id?,
-  context?: { page_title?, page_lang? }, byk?: { provider, model, api_key } }`.
-  Response: `{ session_id, reply, links?: [{title, url}] }` — links returned as **structured,
-  pre-validated data** (already filtered per §9.4), not raw text the client has to parse and
-  re-validate itself.
-- **Gadget assertion:** verified before session lookup, rate-limit accounting, external fetches,
-  or model work. Invalid, expired, replayed, wrong-audience, wrong-wiki, and missing assertions
-  receive a generic rejection. Exact encoding/issuance remains the #63 decision.
+**Decision: accept `Origin`/`Referer`/Fetch Metadata checks (#31) plus exact-origin CORS
+(`https://fr.wikipedia.org` for MVP) as the enforced boundary — explicitly best-effort, not proof
+of gadget execution.** A scripted client that forges these headers can reach the proxy directly.
+This is judged acceptable because the proxy has no confidentiality or integrity blast radius
+beyond the shared LiftWing/Toolforge capacity itself: it's read-only, holds no user data, requires
+no login, and Hermes's interactive tool list is verified empty (#65) — so the worst case of a
+bypass is someone consuming shared model capacity outside the wikipedia.org page, which is exactly
+what the service-protection controls below (#22, decided) exist to bound regardless of caller.
+**Public release is not blocked on this.** #64 is retargeted from "implement the #63 mechanism"
+(there is none to implement) to a non-blocking backlog item: revisit only if WMF platform owners
+ever offer a real attestation primitive, or if bypass abuse is actually observed in production.
+Concrete near-term code follow-up (not done as part of this decision): `reject_unconfigured_attestation()`
+currently 503s every `/chat` call unconditionally — it needs to become a no-op now that #31's
+header checks are the accepted boundary, and whether `gadget_assertion` stays in the request
+contract as a vestigial no-op field or is dropped is part of that same follow-up, not this ADR.
+
+- `POST /chat` — request: `{ message, session_id?, context?: { page_title?, page_lang? },
+  byk?: { provider, model, api_key } }`. Response: `{ session_id, reply, links?: [{title, url}] }`
+  — links returned as **structured, pre-validated data** (already filtered per §9.4), not raw text
+  the client has to parse and re-validate itself.
 - **BYK handling (V1 only):** `byk` is optional, request-scoped secret material. The proxy must redact the
   key before request logging and must not place it in the opaque session, Hermes persistence,
   traces, metrics, errors, or feedback. Supported providers/models remain an explicit V1
@@ -339,12 +354,38 @@ forward Wikimedia usernames or introduce a login requirement.
 - **Session handling:** the proxy mints its own opaque session token for the browser to hold —
   Hermes's own session/memory-scoping headers (`X-Hermes-Session-Id`/`X-Hermes-Session-Key`)
   stay server-side, never exposed to the client.
-- **Service protection, not an end-user budget** (starting point, tune against measurements):
-  per-session/IP request cap (e.g. tens per hour, generous for a help tool, not spam-friendly),
-  plus a global in-flight concurrency cap at the proxy to protect the shared LiftWing latency
-  curve (§3) regardless of Toolforge's own elevated quota.
+- **Service protection, not an end-user budget** (#22, decided — starting point, not measured;
+  review after first sustained production traffic or within 2 weeks of Phase 4 launch, whichever
+  is sooner):
+  - Deployment concurrency: `gunicorn --workers 2 --worker-class gthread --threads 16 --timeout
+    100 --graceful-timeout 30` (Procfile change tracked under #35's implementation, not made by
+    this ADR). `--workers 2` matches Toolforge's 2 vCPU default quota with no CPU oversubscription;
+    `gthread`/`--threads 16` gives I/O concurrency headroom for blocking upstream calls. Fixes a
+    real mismatch found while setting these numbers: the current Procfile sets no `--timeout`,
+    so gunicorn's 30s default would kill a worker mid-retry, since `HERMES_TIMEOUT_SECONDS`
+    defaults to 90s — `--timeout 100` gives that budget margin instead of racing it.
+  - Global in-flight cap, independent of raw connection handling: an application-level admission
+    semaphore of **8** concurrent upstream calls, protecting LiftWing's own latency curve (§3 —
+    p50 ≈18s at concurrency 64) regardless of Toolforge's elevated quota.
+  - Bounded wait queue: up to **16** additional requests may wait for a slot; beyond that,
+    immediate structured `503` (`code: "overloaded"`, with `Retry-After`) rather than unbounded
+    queuing. (2 workers × 16 threads = 32 raw connection slots, comfortably above the
+    8-in-flight + 16-queued = 24 total, leaving slack for health checks and admission
+    bookkeeping.)
+  - Per-session burst cap: 30 requests/hour per proxy-minted session token — a guard against a
+    buggy/looping client, not a real abuse control (the token is trivially resettable
+    client-side, so it can't be treated as identity).
+  - IP-derived counters: **not implemented for MVP.** Deferred pending explicit verification that
+    Toolforge's Build Service ingress supplies a trustworthy client-address header rather than one
+    an attacker could simply set themselves — that verification hasn't been done; do not add
+    IP-keyed storage until it has.
+  - Metrics to review against: p50/p95 request latency, queue-wait time, retry/model-fallback
+    rate, and overloaded-503 rate.
+  - Independent of the #63 caller-boundary decision above and of #31's header checks, per this
+    issue's own acceptance criteria.
 - **Error responses:** structured `{ error: { code, message } }`, with distinct codes for
-  rate-limited, upstream-unavailable (§14), and content-blocked (§9.5 hard-block cases).
+  rate-limited, upstream-unavailable (§14), overloaded (service-protection, above), and
+  content-blocked (§9.5 hard-block cases).
 
 ## 13. Secrets and environment inventory
 
