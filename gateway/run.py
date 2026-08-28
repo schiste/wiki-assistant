@@ -44,4 +44,6 @@ def _read_required_api_server_key(environ: Mapping[str, str]) -> str:
             f"API_SERVER_KEY is shorter than {MIN_API_SERVER_KEY_LENGTH} characters — "
             "refusing to start with a weak key."
         )
+    if any(character.isspace() for character in value):
+        raise RuntimeError("API_SERVER_KEY must not contain whitespace")
     return value

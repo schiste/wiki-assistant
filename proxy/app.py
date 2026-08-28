@@ -46,7 +46,7 @@ class ProxyConfig:
     @classmethod
     def from_environment(cls) -> ProxyConfig:
         base_url = os.environ.get("HERMES_BASE_URL", "").strip()
-        api_server_key = os.environ.get("API_SERVER_KEY", "").strip()
+        api_server_key = os.environ.get("API_SERVER_KEY", "")
         timeout = os.environ.get("HERMES_TIMEOUT_SECONDS", "90").strip()
 
         parsed_url = urllib.parse.urlsplit(base_url)

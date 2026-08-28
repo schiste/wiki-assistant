@@ -1,7 +1,5 @@
 #!/bin/sh
-# Generates a strong random API_SERVER_KEY value and prints the exact toolforge command to
-# provision or rotate it (#30). Deliberately does not run `toolforge envvars` itself — that
-# requires an authenticated session on the Toolforge bastion, which this script cannot assume.
+# Generates and provisions a strong random API_SERVER_KEY through Toolforge envvars (#30).
 #
 # API_SERVER_KEY has one source of truth (architecture §13): this Toolforge envvar, injected
 # into both the internal Hermes job and the public proxy. Neither process may generate or
@@ -9,33 +7,25 @@
 # closed if the envvar is absent or too short.
 set -eu
 
-key_file="$(mktemp)"
+if ! command -v toolforge >/dev/null 2>&1; then
+    echo "generate-api-server-key: run this inside the Toolforge tool account" >&2
+    exit 1
+fi
+
+key_file="$(mktemp "${TMPDIR:-/tmp}/wait-api-server-key.XXXXXX")"
 trap 'rm -f "$key_file"' EXIT INT TERM
 
-# 32 random bytes, hex-encoded = 64 characters — comfortably over Hermes's own >=16-char
-# api_server startup guard (verified against hermes_cli source), with real margin.
-if command -v openssl >/dev/null 2>&1; then
-    openssl rand -hex 32 > "$key_file"
-else
-    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$key_file"
-    printf '\n' >> "$key_file"
-fi
+python3 -c 'import secrets; print(secrets.token_hex(32), end="")' > "$key_file"
 chmod 600 "$key_file"
 
-cat <<EOF >&2
-Generated a new API_SERVER_KEY ($(wc -c < "$key_file" | tr -d ' ') bytes, in $key_file).
+if [ "$(wc -c < "$key_file" | tr -d ' ')" -ne 64 ]; then
+    echo "generate-api-server-key: generated value has an unexpected length" >&2
+    exit 1
+fi
 
-Run this on the Toolforge bastion, inside the wiki-assistant tool account, to provision it
-(first time) or rotate it (replacing an existing value):
+if ! toolforge envvars create API_SERVER_KEY < "$key_file" >/dev/null; then
+    echo "generate-api-server-key: Toolforge rejected the envvar update" >&2
+    exit 1
+fi
 
-    toolforge envvars create API_SERVER_KEY < $key_file
-
-toolforge envvars create prompts interactively for the value; redirecting the generated file
-into it (as above) supplies that value non-interactively without it ever appearing in shell
-history or process listings.
-
-After provisioning or rotating, restart BOTH the gateway continuous job and the proxy
-webservice so neither is left running against a stale value (see docs/api-server-key-rotation.md).
-
-This script never sends the key anywhere itself and does not print its value to stdout.
-EOF
+echo "Provisioned API_SERVER_KEY; restart both the gateway and proxy now" >&2
