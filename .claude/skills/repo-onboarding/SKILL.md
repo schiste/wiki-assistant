@@ -1,0 +1,43 @@
+---
+name: repo-onboarding
+description: Use when starting work in an unfamiliar repository, when the task asks for repo overview, setup, architecture, entrypoints, test commands, or where to begin. Skip for narrow file-scoped edits once the relevant paths are already known.
+---
+
+# Repo Onboarding: wiki-assistant
+
+## When to Use
+
+- Load this skill first when the repository is unfamiliar or the request is broad.
+- Recommended when: first task in repo, repo overview, setup or run instructions, architecture or entrypoints, where should I start, broad debugging or feature-localization request.
+- Skip when: known file-scoped edit, follow-up inside already identified area, task already localized to concrete files.
+- Use `.codex/skills/aethyme/SKILL.md` or `.claude/skills/aethyme/SKILL.md` for Aethyme's short operating contract after orientation; load its `references/` files only when needed.
+
+## Repo Identity
+
+- Kind: `repository`
+- Languages: `unknown`
+- Package manager: `unknown`
+
+## Start Here
+
+
+## Repo Map
+
+- `.github` (automation; automation and CI configuration; high confidence)
+- `docs` (docs; documentation area; high confidence)
+
+## Aethyme Recipes
+
+- `aethyme explore --repo "$PWD" --request "<task>" --format answer-json`
+  Purpose: Broad repository orientation for a user request
+- `aethyme repo inspect "$PWD" --mode brief --json-output`
+  Purpose: Quick deterministic repo summary
+- `aethyme graph callers "$PWD" "<symbol-or-file>" --json-output`
+  Purpose: Trace likely impact before editing
+
+## Freshness
+
+- Source digest: `bcc6fcb25ddaceaec4e18f3bdf737ce3fe243b4232ff31a50d03953fff0a0c8c`
+- Tracked source files: `19`
+- Overrides applied: `False`
+- Sections generated: `repo, commands, areas, entrypoints, caution_zones, navigation_recipes, summon, freshness`
