@@ -17,6 +17,10 @@ MAX_REQUEST_BYTES = 65_536
 MAX_UPSTREAM_BYTES = 1_048_576
 MVP_BROWSER_ORIGIN = "https://fr.wikipedia.org"
 MVP_MODEL_IDS = ("llm-qwen36-27b", "llm-qwen3-14b")
+MEDIAWIKI_CODING_SAFETY_INSTRUCTION = (
+    "When suggesting JavaScript, CSS, or Lua for MediaWiki, never suggest disabling "
+    "or weakening CSRF token handling, origin checks, or permission checks."
+)
 SESSION_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
 StartResponse = Callable[[str, list[tuple[str, str]]], object]
 AttestationVerifier = Callable[[Mapping[str, object], Mapping[str, object]], None]
@@ -117,7 +121,12 @@ class HermesClient:
         self._config = config
         self._opener = urllib.request.build_opener(NoRedirectHandler)
 
-    def chat(self, message: str, session_id: str, session_key: str) -> str:
+    def chat(
+        self,
+        messages: tuple[dict[str, str], ...],
+        session_id: str,
+        session_key: str,
+    ) -> str:
         deadline = time.monotonic() + self._config.upstream_timeout_seconds
         for model_id in self._config.model_ids:
             for retry_number in range(self._config.upstream_retry_count + 1):
@@ -127,7 +136,7 @@ class HermesClient:
                 try:
                     return self._chat_with_model(
                         model_id,
-                        message,
+                        messages,
                         session_id,
                         session_key,
                         remaining_seconds,
@@ -149,7 +158,7 @@ class HermesClient:
     def _chat_with_model(
         self,
         model_id: str,
-        message: str,
+        messages: tuple[dict[str, str], ...],
         session_id: str,
         session_key: str,
         timeout_seconds: float,
@@ -157,7 +166,13 @@ class HermesClient:
         request_body = json.dumps(
             {
                 "model": model_id,
-                "messages": [{"role": "user", "content": message}],
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": MEDIAWIKI_CODING_SAFETY_INSTRUCTION,
+                    },
+                    *messages,
+                ],
             }
         ).encode()
         request = urllib.request.Request(
@@ -274,6 +289,7 @@ class ProxyApplication:
                 "invalid_request",
                 "message must be a non-empty string",
             )
+        history = self._read_history(body.get("history", []))
 
         session_token = body.get("session_id")
         if session_token is None:
@@ -287,8 +303,9 @@ class ProxyApplication:
 
         hermes_session_id = self._derive_session_value("transcript", session_token)
         hermes_session_key = self._derive_session_value("memory", session_token)
+        messages = (*history, {"role": "user", "content": message.strip()})
         reply = self._hermes_client.chat(
-            message.strip(), hermes_session_id, hermes_session_key
+            messages, hermes_session_id, hermes_session_key
         )
         return self._json_response(
             start_response,
@@ -387,6 +404,33 @@ class ProxyApplication:
                 "400 Bad Request", "invalid_json", "Request body must be a JSON object"
             )
         return body
+
+    @staticmethod
+    def _read_history(raw_history: object) -> tuple[dict[str, str], ...]:
+        if not isinstance(raw_history, list) or len(raw_history) % 2 != 0:
+            raise RequestRejected(
+                "400 Bad Request",
+                "invalid_history",
+                "history must contain complete user and assistant turns",
+            )
+
+        history = []
+        for index, raw_message in enumerate(raw_history):
+            expected_role = "user" if index % 2 == 0 else "assistant"
+            if (
+                not isinstance(raw_message, dict)
+                or set(raw_message) != {"role", "content"}
+                or raw_message.get("role") != expected_role
+                or not isinstance(raw_message.get("content"), str)
+                or not raw_message["content"].strip()
+            ):
+                raise RequestRejected(
+                    "400 Bad Request",
+                    "invalid_history",
+                    "history must alternate non-empty user and assistant messages",
+                )
+            history.append({"role": expected_role, "content": raw_message["content"]})
+        return tuple(history)
 
     @staticmethod
     def _cors_response_headers(
