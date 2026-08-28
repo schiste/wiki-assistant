@@ -33,8 +33,9 @@ both require a tool-calling-capable model and LiftWing's Qwen can't tool-call (a
 a personal userscript on frwiki (architecture §1.1) — not yet an official gadget.
 
 ### Epic 2 — V1
-Composable: onboard additional wikis, enable BYK for other providers, turn on the patch proposer
-and discovery-mode tier 2, graduate from userscript to official gadget. Built on abstractions
+Composable: onboard additional wikis, enable transient end-user BYK for supported providers,
+turn on discovery-mode tier 2, resolve and then implement the patch proposer's separate
+credential/trigger model, and graduate from userscript to official gadget. Built on abstractions
 Epic 1 should already leave in place (the model-fallback chain in §14 and the tier-1/tier-2 split
 in §5/§10.4 were designed config-driven from the start specifically so this doesn't require
 re-architecture).
@@ -101,8 +102,8 @@ carrying ambiguity into implementation.
 
 - [ ] `.pre-commit-config.yaml` (using the `pre-commit` framework), minimum set:
   - `trailing-whitespace`, `end-of-file-fixer`, `check-yaml`, `check-json`, `check-merge-conflict`
-  - Secret scanning: `gitleaks` — reuse/adapt Hermes's own `.gitleaks.toml` as a starting
-    baseline rather than writing rules from scratch.
+  - Secret scanning: `gitleaks` — extend its maintained default rules and add only narrow
+    repository-specific path allowlists. Hermes currently provides no upstream config to copy.
   - Python (proxy, gateway config, eval harness): `ruff` (lint + format).
   - JS/CSS (gadget/userscript): `eslint` + `prettier`.
 - [ ] Pre-push hook: fast unit test suite + a final lint pass. **Deliberately excludes eval**
@@ -127,9 +128,12 @@ Phase 2 starts building against them. Recommended agenda, one row = one decision
 - [ ] Exact GitHub org/repo name and GitLab mirror target (Phase 0 placeholders).
 - [ ] Exact Toolforge tool account name.
 - [ ] Watchdog alerting channel (architecture §11: email / Phabricator task / IRC / other).
-- [ ] BYK provider/model choice for V1 (patch proposer, §6; discovery-mode tier 2, §10.4) — can
-      be deferred in detail to Phase 6/7, but naming a default candidate now avoids relitigating
-      it later.
+- [ ] Supported end-user BYK providers/models for V1 discovery mode (§5, §6, §10.4) — define a
+      fixed compatibility allowlist and request contract; this is not a project-owned key or
+      spending decision.
+- [ ] Patch-proposer trigger/credential model (§6) — choose maintainer-triggered with a transient
+      maintainer key or a dedicated operator credential with separately approved controls. Keep
+      the worker disabled until this is decided; do not label the operator credential BYK.
 - [ ] Rate-limit numbers in §12 (derived starting points, not measured) — confirm as the v0
       defaults or adjust before they're hardcoded anywhere.
 - [ ] Privacy statement ownership and drafting timeline (architecture §8) — who writes it, due
@@ -155,20 +159,23 @@ every alignment-session item — no open questions carried silently into Phase 2
 
 **Tasks**
 
-- [ ] First-boot init script (non-root): directory scaffolding, seed config, generate
-      `API_SERVER_KEY`, sync bundled skills (architecture §4).
-- [ ] Toolforge `webservice` running `hermes gateway run`, `HERMES_HOME` on NFS-backed
-      `/data/project/...`, `cron.provider=builtin`.
-- [ ] Proxy backend skeleton via Build Service (architecture §4, §12): session minting endpoint,
-      `POST /chat` stub proxying to `api_server` with no logic yet beyond the round trip.
-- [ ] Secrets: provision `API_SERVER_KEY` via Toolforge envvars (§13). **No BYK secret yet** —
-      MVP is LiftWing-only.
-- [ ] CORS configured on `api_server` for `*.wikipedia.org` (even though MVP only targets
-      frwiki — configuring the whole family now costs nothing and avoids revisiting it in
-      Phase 8).
+- [ ] First-boot init script (non-root): directory scaffolding, seed config, validate the
+      provisioned `API_SERVER_KEY`, sync bundled skills (architecture §4).
+- [ ] Internal Toolforge continuous job running `hermes gateway run`, `HERMES_HOME` on NFS-backed
+      `/data/project/...`, `cron.provider=builtin`; no public ingress or browser-facing CORS.
+- [ ] Proxy backend skeleton as the single public Build Service webservice (architecture §4,
+      §12): session minting endpoint and `POST /chat` stub proxying to the internal Hermes
+      service with no product logic yet.
+- [ ] Secrets: provision `API_SERVER_KEY` via Toolforge envvars (§13). There is no BYK service
+      secret or BYK envvar; end-user BYK arrives only as Phase 7 request data.
+- [ ] Exact-origin CORS and server-side `Origin` validation on the public proxy: allow
+      `https://fr.wikipedia.org` for MVP; reject missing, `null`, HTTP, unrelated, and
+      suffix-confusion origins before model work starts. Add exact origins as wikis onboard.
+      This is independent of Wikipedia login and must not introduce OAuth or identity forwarding.
 
-**Exit criteria:** a request through the proxy reaches Hermes's `api_server`, reaches LiftWing's
-Qwen, and a response comes back — no security hardening, no product logic, just the pipe working.
+**Exit criteria:** a request from the allowed frwiki origin reaches the public proxy, the internal
+Hermes service, and LiftWing Qwen, then returns successfully. Disallowed browser origins are
+rejected and Hermes has no public route. No product logic beyond this pipe and caller boundary.
 
 ---
 
@@ -184,11 +191,14 @@ feature is built on top of it.
 - [ ] Link allowlist implemented **server-side in the proxy** (§9.4, §12): hostname parsing with
       dot-boundary matching, `https:`-only scheme check, the full Wikimedia domain list, path
       restriction to `/wiki/<Title>`.
-- [ ] Input-side injection scan (§9.5): proxy calls Hermes's `scan_for_threats()` on any
-      wiki-sourced content before it enters the prompt; warn-and-log by default, hard-block only
-      the clearest patterns; content framed as untrusted data in the prompt itself.
+- [ ] Input-side injection scan (§9.5): proxy calls Hermes's `scan_for_threats()` on every
+      externally retrieved context item before it enters the prompt, including wiki content and
+      tier-1 Toolhub records; warn-and-log by default, hard-block only the clearest patterns;
+      content framed as untrusted data in the prompt itself.
 - [ ] Rate limiting at the proxy (§12): global in-flight concurrency cap (~8, per §3's
-      concurrency curve), per-session/IP burst + sustained caps (values confirmed in Phase 1).
+      concurrency curve), per-session burst + sustained caps, and short-TTL non-identifying IP
+      counters only if Toolforge exposes a reliable client address. This is abuse mitigation,
+      not authentication; no Wikipedia identity is collected.
 - [ ] Degradation chain (§14), MVP scope: retry-with-backoff → `llm-qwen36-27b` →
       `llm-qwen3-14b` → graceful failure message. No BYK rung yet — that's Phase 7.
 - [ ] Code-suggestion disclaimer (§9.8) wired into every code block the gadget renders, even
@@ -212,10 +222,12 @@ reviewed, not just designed — this phase produces working code, not another ro
 - [ ] Corpus fetch: policy/guideline pages and template documentation via the public MediaWiki
       API, scoped to `fr.wikipedia.org` for MVP (§10 points 1–2).
 - [ ] Coding assistance (§10 point 3, §9.8): JS/CSS/Lua help, frwiki gadget/module conventions.
-- [ ] Tool discovery, **tier 1 only** (§10.4): proxy calls `toolhub-evolved` server-side, results
-      stuffed into context as text. Tier 2 (BYK-gated MCP tool-calling) is explicitly Phase 7.
+- [ ] Tool discovery, **tier 1 only** (§10.4): proxy calls `toolhub-evolved` server-side, scans
+      and frames results as untrusted context, then inserts relevant text. Tier 2 (end-user
+      BYK-gated MCP tool-calling) is explicitly Phase 7.
 - [ ] On-wiki script: `User:<maintainer>/WAIT.js` on frwiki, calling only the proxy (never
-      `api_server` directly), rendering per Phase 3's text-only rule.
+      `api_server` directly), sending no Wikimedia login/OAuth identity, and rendering per Phase
+      3's text-only rule.
 
 **Exit criteria:** a maintainer can use the userscript on frwiki and get real, useful answers
 across all four capabilities, tier-1 discovery included.
@@ -266,33 +278,40 @@ are built on top of it.
       wiki-family-wide, not frwiki-specific — nothing to change there.)
 - [ ] Provider-scoping abstraction: the model-fallback chain (§14) already treats models as an
       ordered config list — this phase is mostly about confirming that holds, not rebuilding it.
-- [ ] Cost-tracking scaffolding for the two BYK cost centers (§6, §13) that Phase 7 will start
-      spending against.
+- [ ] Transient end-user BYK contract (§6, §12): fixed provider/model allowlist, request-scoped
+      credential handoff, mandatory redaction, no persistence, session isolation, and explicit
+      fallback signals for missing credentials, provider rejection/quota, and unavailability.
 
 **Exit criteria:** adding a second wiki or a second model provider is a config change, verified
 by actually doing it once in a non-production/staging path before Phase 7 depends on it.
 
 ---
 
-## Phase 7 — BYK-gated features (Epic 2: V1)
+## Phase 7 — End-user BYK and gated features (Epic 2: V1)
 
 **Goal:** turn on the capabilities MVP deliberately deferred.
 
 **Tasks**
 
-- [ ] BYK secret provisioned via Toolforge envvars (§13), provider/model confirmed from Phase 1's
-      alignment session.
-- [ ] Patch proposer (§6, §7, §11): real agent loop, curated toolset, propose-only guardrail
-      enforced by credential scope. Now genuinely testable, since eval (Phase 5) exists to feed
-      it real regressions.
+- [ ] End-user BYK request flow implemented for the supported provider/model allowlist (§6,
+      §12): the credential remains client/request-scoped, is redacted before observability, and
+      never enters Toolforge envvars, session persistence, files, metrics, feedback, or errors.
+- [ ] Patch proposer (§6, §7, §11): implement only the credential/trigger model recorded in
+      Phase 1, with a real agent loop, curated toolset, and propose-only credential scope. It
+      never borrows an interactive user's BYK credential and remains disabled if the decision is
+      still open.
 - [ ] Discovery-mode tier 2 (§5, §10.4): narrow MCP toolset bound to `toolhub-evolved`, gated on
-      BYK availability/budget, bounded tool-calls-per-turn, falling back to tier 1 via the same
-      degradation chain as §14.
-- [ ] Budget alerts on both BYK cost centers — this is the phase where an unbounded cost
-      surface actually turns on, so the tracking from Phase 6 needs to be live, not scaffolded.
+      transient end-user BYK availability, bounded tool calls per turn to protect Toolhub, and
+      falling back to tier 1 when no key is supplied or the user's provider rejects quota/is
+      unavailable.
+- [ ] Security verification for BYK isolation: no credential appears in logs/traces/errors,
+      credentials cannot cross sessions, unsupported providers/endpoints are rejected, and
+      provider quota failures fall back without exposing secret material.
 
-**Exit criteria:** patch proposer has produced at least one real, human-reviewed proposal from an
-actual eval regression; discovery tier 2 is live and falls back cleanly when BYK is unavailable.
+**Exit criteria:** discovery tier 2 works with an end-user key and falls back cleanly without one,
+with no server-side key persistence or project BYK budget. If the patch-proposer model was
+approved, it has produced one real human-reviewed proposal; otherwise it remains explicitly
+disabled and is not silently counted as complete.
 
 ---
 
@@ -311,6 +330,7 @@ graduates to an official, community-reviewed gadget.
       CSP/Third-Party-Resources risk profile (§16) changes slightly once it's a community-wide
       gadget rather than a personal script, even though the code itself doesn't change.
 
-**Exit criteria — V1 is done when:** WAIT is an official gadget on at least two wikis, with
-patch proposer and discovery tier 2 both live in production, and composability has been
-exercised for real, not just designed.
+**Exit criteria — V1 is done when:** WAIT is an official gadget on at least two wikis,
+end-user-BYK discovery tier 2 is live with its security controls, and composability has been
+exercised for real, not just designed. The patch proposer is live only if its separate model was
+approved; otherwise its explicitly disabled state is the recorded outcome.

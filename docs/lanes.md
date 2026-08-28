@@ -15,11 +15,12 @@ tracking issues (#1–#11) are unlabeled by lane — they span both.
 
 **Lane A** leans infra/ops/backend: Toolforge, the Hermes gateway (`gateway/`), eval/watchdog,
 the maintenance tier (patch proposer), and the alignment/governance decisions that are
-infra-flavored (Toolforge naming, watchdog channel, BYK provider, BAG/BRFA timing).
+infra-flavored (Toolforge naming, watchdog channel, patch-proposer credentials, BAG/BRFA timing).
 
 **Lane B** leans product/client-facing: the proxy (`proxy/`), the on-wiki gadget (`gadget/`),
 the four interactive-tier product capabilities, and the alignment/governance decisions that are
-product-flavored (rate limits, privacy statement, gadget-graduation criteria, licensing).
+product-flavored (rate limits, privacy statement, end-user BYK compatibility,
+gadget-graduation criteria, licensing).
 
 This isn't a rigid architectural law — it's a *task-grouping* heuristic chosen because `gateway/`
 and `proxy/` are separate directories with a defined API contract between them (architecture
@@ -60,18 +61,17 @@ before submitting regardless.
 
 No dependency between them — both are external, one-off setup actions.
 
-### Phase 1 — Core repo tooling & alignment (13 issues + #61)
+### Phase 1 — Core repo tooling & alignment (15 issues)
 | Lane A | Lane B |
 |---|---|
 | #14 `.pre-commit-config.yaml` | #15 pre-push hook |
 | #16 CI workflow | #18 GH/GitLab naming decision |
 | #17 branch protection required check *(after #16)* | #22 rate-limit numbers decision |
 | #19 Toolforge tool name decision | #23 privacy-statement owner/deadline |
-| #20 watchdog alerting channel decision | #25 gadget-graduation criteria |
-| #21 BYK provider/model decision | #26 license-split confirmation |
-| #24 BAG/BRFA timing decision | |
-| #61 draft `gates.toml` *(after #16)* | |
-| #62 patch-proposer trigger & credential model — **blocks #54/#56 in Phase 7**, keep scheduling disabled until resolved | |
+| #20 watchdog alerting channel decision | #21 end-user BYK provider/model compatibility |
+| #24 BAG/BRFA timing decision | #25 gadget-graduation criteria |
+| #61 draft `gates.toml` *(after #16)* | #26 license-split confirmation |
+| #62 patch-proposer trigger/credential decision | |
 
 **Sequencing:** #17 strictly after #16 (same lane). #61 strictly after #16. #15 should start once
 #14's lint/format tool choices are settled — light cross-lane handoff, not a hard block (both
@@ -127,21 +127,20 @@ Balanced 3/3, no hard sequencing between the two columns.
 | Lane A | Lane B |
 |---|---|
 | #51 confirm model-fallback chain is provider-agnostic | #50 wiki-scoping abstraction |
-| #52 cost-tracking scaffolding | |
+| | #52 transient end-user BYK contract |
 
-Small phase — 2/1 is the natural balance, not forced.
+Small phase — 1/2 follows the actual gateway-versus-proxy ownership.
 
-### Phase 7 — BYK-gated features (4 issues)
+### Phase 7 — End-user BYK and gated features (4 issues)
 | Lane A | Lane B |
 |---|---|
-| #53 provision BYK secret via envvars | #55 discovery-mode tier 2 (BYK-gated MCP) |
-| #54 implement the patch proposer | #56 budget alerts (both cost centers) |
+| #54 patch proposer *(blocked on #62)* | #53 transient end-user BYK request flow |
+| | #55 discovery-mode tier 2 with end-user BYK |
+| | #56 BYK isolation and fallback security verification |
 
-**Sequencing:** #54 needs #53's secret to actually test against a real model; #55 needs it too —
-land #53 first, or stub/mock it briefly so both lanes can build their logic before the real key
-exists. **#54 and #56 are also blocked on #62** (Phase 1's patch-proposer trigger/credential
-decision) — don't start either until that ADR is recorded, and keep scheduling disabled per
-#62's acceptance criteria until it resolves.
+**Sequencing:** #52 defines the contract before this phase. Lane B lands #53 before #55, then
+#56 verifies both. Lane A can implement #54 only after #62 records a patch-proposer credential
+model; #54 never depends on or consumes #53's interactive user keys.
 
 ### Phase 8 — Multi-wiki onboarding & gadget graduation (4 issues — V1 done here)
 | Lane A | Lane B |
