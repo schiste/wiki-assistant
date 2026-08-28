@@ -1,0 +1,53 @@
+# Gates for WAIT (#61). Mirror .pre-commit-config.yaml and .github/workflows/ci.yml —
+# do not invent a third definition of "passing." When either changes, update this file
+# in the same commit.
+#
+# Contract notes:
+# - Each gate calls a specific pre-commit hook id (not `pre-commit run --all-files`) so
+#   a gate's own trigger globs and the hook's internal `files:` regex agree on scope —
+#   a docs-only diff should not pay for the eslint/prettier/ruff environments spinning up.
+# - `secrets` and `hygiene` have no triggers (always run): a leaked credential or a
+#   whitespace/merge-conflict artifact can land in any file, including docs.
+# - `unit-tests` triggers on the code directories plus the test runner script itself and
+#   the pre-commit/CI config that defines what "passing" means, so a config-only change
+#   still gets verified against the real check, not skipped as "no code touched."
+
+[[gate]]
+name = "secrets"
+command = 'pre-commit run gitleaks --all-files'
+cost = 1
+
+[[gate]]
+# `pre-commit run` takes at most one hook id, not a list — chain with && so
+# every hook's failure still fails the gate (2026-08-28: caught by actually
+# running this gate; the space-separated form silently errors with exit 2
+# on "unrecognized arguments" instead of running any hook).
+name = "hygiene"
+command = 'pre-commit run trailing-whitespace --all-files && pre-commit run end-of-file-fixer --all-files && pre-commit run check-yaml --all-files && pre-commit run check-json --all-files && pre-commit run check-merge-conflict --all-files'
+cost = 1
+
+[[gate]]
+name = "python-lint"
+command = 'pre-commit run ruff-check --all-files && pre-commit run ruff-format --all-files'
+cost = 1
+triggers = ["eval/**/*.py", "gateway/**/*.py", "proxy/**/*.py", ".pre-commit-config.yaml"]
+
+[[gate]]
+name = "js-lint"
+command = 'pre-commit run eslint --all-files && pre-commit run prettier --all-files'
+cost = 1
+triggers = ["gadget/**/*.js", "gadget/**/*.cjs", "gadget/**/*.mjs", "gadget/**/*.css", "eslint.config.mjs", ".pre-commit-config.yaml"]
+
+[[gate]]
+name = "unit-tests"
+command = './scripts/test-unit'
+cost = 2
+triggers = [
+    "eval/**",
+    "gateway/**",
+    "proxy/**",
+    "gadget/**",
+    "tests/**",
+    "scripts/test-unit",
+    ".pre-commit-config.yaml",
+]
