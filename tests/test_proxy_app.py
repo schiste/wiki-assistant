@@ -2,6 +2,7 @@ import io
 import json
 import os
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 from proxy.app import (
@@ -350,6 +351,21 @@ class ProxyApplicationTest(unittest.TestCase):
                 "API_SERVER_KEY": "a" * 32,
                 "HERMES_TIMEOUT_SECONDS": "301",
             },
+            {
+                "HERMES_BASE_URL": "http://hermes:8642",
+                "API_SERVER_KEY": "a" * 32,
+                "HERMES_MODEL_IDS": "llm-qwen36-27b,",
+            },
+            {
+                "HERMES_BASE_URL": "http://hermes:8642",
+                "API_SERVER_KEY": "a" * 32,
+                "HERMES_RETRY_COUNT": "0",
+            },
+            {
+                "HERMES_BASE_URL": "http://hermes:8642",
+                "API_SERVER_KEY": "a" * 32,
+                "HERMES_RETRY_BACKOFF_SECONDS": "6",
+            },
         ]
 
         for environment in cases:
@@ -357,6 +373,20 @@ class ProxyApplicationTest(unittest.TestCase):
                 with patch.dict(os.environ, environment, clear=True):
                     with self.assertRaises(RuntimeError):
                         ProxyConfig.from_environment()
+
+    def test_environment_config_loads_an_ordered_model_list(self):
+        with patch.dict(
+            os.environ,
+            {
+                "HERMES_BASE_URL": "http://hermes:8642",
+                "API_SERVER_KEY": "a" * 32,
+                "HERMES_MODEL_IDS": "primary-model, fallback-model",
+            },
+            clear=True,
+        ):
+            config = ProxyConfig.from_environment()
+
+        self.assertEqual(config.model_ids, ("primary-model", "fallback-model"))
 
     def test_hermes_client_uses_only_the_private_bearer_and_derived_sessions(self):
         captured = {}
@@ -376,7 +406,8 @@ class ProxyApplicationTest(unittest.TestCase):
 
         request = captured["request"]
         self.assertEqual(reply, "Réponse")
-        self.assertEqual(captured["timeout"], 90.0)
+        self.assertGreater(captured["timeout"], 89.0)
+        self.assertLessEqual(captured["timeout"], 90.0)
         self.assertEqual(
             request.full_url,
             "http://hermes.internal:8642/v1/chat/completions",
@@ -388,6 +419,96 @@ class ProxyApplicationTest(unittest.TestCase):
         self.assertEqual(request.get_header("X-hermes-session-id"), "session-id")
         self.assertEqual(request.get_header("X-hermes-session-key"), "session-key")
         self.assertNotIn(self.config.api_server_key, request.data.decode())
+        self.assertEqual(json.loads(request.data)["model"], "llm-qwen36-27b")
+
+    def test_hermes_client_uses_the_next_configured_model_after_failure(self):
+        config = ProxyConfig(
+            "http://hermes.internal:8642",
+            "a" * 32,
+            model_ids=("primary-model", "fallback-model"),
+        )
+        response = io.BytesIO(
+            json.dumps({"choices": [{"message": {"content": "Secours"}}]}).encode()
+        )
+        client = HermesClient(config)
+
+        with patch.object(
+            client._opener,
+            "open",
+            side_effect=[
+                urllib.error.HTTPError(
+                    "https://hermes.invalid", 400, "Bad Request", {}, None
+                ),
+                response,
+            ],
+        ) as open_request:
+            reply = client.chat("Question", "session-id", "session-key")
+
+        self.assertEqual(reply, "Secours")
+        attempted_models = [
+            json.loads(call.args[0].data)["model"]
+            for call in open_request.call_args_list
+        ]
+        self.assertEqual(attempted_models, ["primary-model", "fallback-model"])
+
+    def test_hermes_client_retries_transient_failures_with_backoff(self):
+        config = ProxyConfig(
+            "http://hermes.internal:8642",
+            "a" * 32,
+            upstream_timeout_seconds=10,
+            model_ids=("primary-model",),
+            upstream_retry_count=2,
+            upstream_retry_backoff_seconds=0.5,
+        )
+        response = io.BytesIO(
+            json.dumps({"choices": [{"message": {"content": "Réponse"}}]}).encode()
+        )
+        client = HermesClient(config)
+
+        with (
+            patch.object(
+                client._opener,
+                "open",
+                side_effect=[
+                    urllib.error.URLError("unavailable"),
+                    urllib.error.HTTPError(
+                        "https://hermes.invalid", 503, "Unavailable", {}, None
+                    ),
+                    response,
+                ],
+            ) as open_request,
+            patch("proxy.app.time.sleep") as sleep,
+        ):
+            reply = client.chat("Question", "session-id", "session-key")
+
+        self.assertEqual(reply, "Réponse")
+        self.assertEqual(open_request.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.5, 1.0])
+
+    def test_hermes_client_stops_when_backoff_would_exceed_total_timeout(self):
+        config = ProxyConfig(
+            "http://hermes.internal:8642",
+            "a" * 32,
+            upstream_timeout_seconds=1,
+            model_ids=("primary-model", "fallback-model"),
+            upstream_retry_backoff_seconds=0.5,
+        )
+        client = HermesClient(config)
+
+        with (
+            patch.object(
+                client._opener,
+                "open",
+                side_effect=urllib.error.URLError("unavailable"),
+            ) as open_request,
+            patch("proxy.app.time.monotonic", side_effect=[0, 0, 0.75]),
+            patch("proxy.app.time.sleep") as sleep,
+        ):
+            with self.assertRaises(UpstreamUnavailable):
+                client.chat("Question", "session-id", "session-key")
+
+        self.assertEqual(open_request.call_count, 1)
+        sleep.assert_not_called()
 
     def test_hermes_client_rejects_oversized_upstream_response(self):
         client = HermesClient(self.config)
