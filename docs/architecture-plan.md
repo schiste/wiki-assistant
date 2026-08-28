@@ -313,40 +313,43 @@ server-side. Enforces the link allowlist (§9.4) and injection scan (§9.5) **se
 just in client JS — a client-side-only check is inspectable and bypassable, so defense belongs
 on the server that actually talks to the model.
 
-**Caller boundary: browser-origin enforcement, not cryptographic gadget attestation (ADR, #63,
+**Caller boundary: server-verifiable gadget attestation plus browser defenses (ADR, #63,
 decided).** Browsers call the proxy, never Hermes directly — Hermes has no public route at all
-(§4). The original goal was stricter than CORS: prove server-side that a request came from the
-approved Wikipedia userscript/gadget specifically, not just from an allowed origin. That goal
-turns out not to be achievable without either (a) tying the check to a logged-in Wikimedia
-identity — ruled out; this design must stay independent of login state — or (b) new WMF-platform
-attestation infrastructure that does not exist today and that this project cannot unilaterally
-build or schedule. Every alternative considered that avoids both either collapses to a value any
-scripted `curl` client can obtain just as easily as a real browser (MediaWiki's read APIs are
-public and don't require in-browser JS execution — a same-origin "call the wiki's own API as a
-proof-of-execution oracle" scheme fails for this reason), or is a reusable secret that stops being
-secret the moment the gadget ships (a CSP nonce isn't readable by page script by design; a
-hardcoded token in public JS is public by definition).
+(§4). WAIT's product requirement is stricter than CORS: a request is served only when the proxy
+can verify that it was made by the approved Wikipedia userscript/gadget. `Origin`, `Referer`, and
+Fetch Metadata checks remain mandatory defense in depth, with `https://fr.wikipedia.org` as the
+sole MVP origin, but a custom client can forge all of those headers. Service-protection controls
+bound capacity abuse; they do not establish caller provenance and cannot substitute for this
+requirement.
 
-**Decision: accept `Origin`/`Referer`/Fetch Metadata checks (#31) plus exact-origin CORS
-(`https://fr.wikipedia.org` for MVP) as the enforced boundary — explicitly best-effort, not proof
-of gadget execution.** A scripted client that forges these headers can reach the proxy directly.
-This is judged acceptable because the proxy has no confidentiality or integrity blast radius
-beyond the shared LiftWing/Toolforge capacity itself: it's read-only, holds no user data, requires
-no login, and Hermes's interactive tool list is verified empty (#65) — so the worst case of a
-bypass is someone consuming shared model capacity outside the wikipedia.org page, which is exactly
-what the service-protection controls below (#22, decided) exist to bound regardless of caller.
-**Public release is not blocked on this.** #64 is retargeted from "implement the #63 mechanism"
-(there is none to implement) to a non-blocking backlog item: revisit only if WMF platform owners
-ever offer a real attestation primitive, or if bypass abuse is actually observed in production.
-Concrete near-term code follow-up (not done as part of this decision): `reject_unconfigured_attestation()`
-currently 503s every `/chat` call unconditionally — it needs to become a no-op now that #31's
-header checks are the accepted boundary, and whether `gadget_assertion` stays in the request
-contract as a vestigial no-op field or is dropped is part of that same follow-up, not this ADR.
+**Decision: no currently available mechanism satisfies strict gadget-only access while keeping
+Wikipedia login and identity irrelevant, so public release remains blocked.** A same-origin
+MediaWiki read request is callable by a scripted client too; a CSP nonce is deliberately
+unreadable by page script; and a token embedded in public gadget JavaScript is reusable public
+data, not a secret. Accepting forgeable browser headers would change the product requirement
+rather than implement it. This project does not make that change. Issue #63 records the blocked
+decision; issue #64 remains the implementation gate pending a WMF-controlled or otherwise
+server-verifiable, short-lived, audience-bound, request-bound, and replay-resistant primitive.
+The decision may be revisited if platform owners provide such a primitive or the project owner
+explicitly changes the no-login or strict gadget-only constraint.
 
-- `POST /chat` — request: `{ message, session_id?, context?: { page_title?, page_lang? },
-  byk?: { provider, model, api_key } }`. Response: `{ session_id, reply, links?: [{title, url}] }`
-  — links returned as **structured, pre-validated data** (already filtered per §9.4), not raw text
-  the client has to parse and re-validate itself.
+`reject_unconfigured_attestation()` therefore remains the production default and must fail closed
+before session lookup, rate-limit accounting, external fetches, or model work. It is not a
+temporary cleanup target. Tests may inject a verifier explicitly, but deployment must not replace
+the default with a no-op or treat `gadget_assertion` as an ignored compatibility field.
+
+- `POST /chat` — request: `{ message, gadget_assertion, session_id?,
+  history?: [{ role, content }], context?: { page_title?, page_lang? },
+  byk?: { provider, model, api_key } }`. Response:
+  `{ session_id, reply, links?: [{title, url}] }` — links returned as **structured,
+  pre-validated data** (already filtered per §9.4), not raw text the client has to parse and
+  re-validate itself.
+- **Gadget assertion:** verified before session lookup, rate-limit accounting, external fetches,
+  or model work. It binds the canonical request payload, including the message, complete ordered
+  history, presented proxy session token, origin/wiki, audience, expiry, and any future
+  server-action selector. Missing, invalid, expired, replayed, mutated-payload, wrong-audience,
+  and wrong-wiki assertions receive a generic rejection. Exact encoding and issuance depend on
+  the platform mechanism tracked by #63/#64.
 - **BYK handling (V1 only):** `byk` is optional, request-scoped secret material. The proxy must redact the
   key before request logging and must not place it in the opaque session, Hermes persistence,
   traces, metrics, errors, or feedback. Supported providers/models remain an explicit V1
