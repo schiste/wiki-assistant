@@ -1,0 +1,4 @@
+platform_toolsets:
+  api_server:
+    # An empty list still inherits globally enabled MCP servers in pinned Hermes.
+    - no_mcp

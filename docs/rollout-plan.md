@@ -34,8 +34,8 @@ a personal userscript on frwiki (architecture §1.1) — not yet an official gad
 
 ### Epic 2 — V1
 Composable: onboard additional wikis, enable transient end-user BYK for supported providers,
-turn on discovery-mode tier 2, resolve and then implement the patch proposer's separate
-credential/trigger model, and graduate from userscript to official gadget. Built on abstractions
+turn on discovery-mode tier 2, optionally enable the separately isolated patch proposer, and
+graduate from userscript to official gadgets on two wikis. Built on abstractions
 Epic 1 should already leave in place (the model-fallback chain in §14 and the tier-1/tier-2 split
 in §5/§10.4 were designed config-driven from the start specifically so this doesn't require
 re-architecture).
@@ -109,7 +109,8 @@ carrying ambiguity into implementation.
 - [ ] Pre-push hook: fast unit test suite + a final lint pass. **Deliberately excludes eval**
       (decided) — eval hits LiftWing, a shared, latency-variable, no-SLA resource (architecture
       §3); keeping it out of the local pre-push path means a developer's push speed never
-      depends on LiftWing's mood. Eval runs in CI only, from Phase 5 onward.
+      depends on LiftWing's mood. Deterministic eval tests run in CI; live LiftWing eval runs
+      from Toolforge in Phase 5.
 - [ ] GitHub Actions CI mirrors every pre-commit check server-side (local hooks are
       bypassable with `--no-verify`; CI is the actual gate) plus runs the unit test suite.
 - [ ] `AGENTS.md` (or `CLAUDE.md`) at repo root: conventions for AI-coding-agent contributors —
@@ -122,25 +123,21 @@ carrying ambiguity into implementation.
 
 **Tasks — alignment session (internal, not with an external audience)**
 
-A structured internal discussion to close every item the architecture plan left open, before
-Phase 2 starts building against them. Recommended agenda, one row = one decision to record:
+A structured internal discussion closes the decisions that affect MVP before Phase 2. V1-only
+decisions stay in Phase 6 so they do not block the deliberately BYK-free MVP:
 
 - [ ] Exact GitHub org/repo name and GitLab mirror target (Phase 0 placeholders).
 - [ ] Exact Toolforge tool account name.
 - [ ] Watchdog alerting channel (architecture §11: email / Phabricator task / IRC / other).
-- [ ] Supported end-user BYK providers/models for V1 discovery mode (§5, §6, §10.4) — define a
-      fixed compatibility allowlist and request contract; this is not a project-owned key or
-      spending decision.
-- [ ] Patch-proposer trigger/credential model (§6) — choose maintainer-triggered with a transient
-      maintainer key or a dedicated operator credential with separately approved controls. Keep
-      the worker disabled until this is decided; do not label the operator credential BYK.
-- [ ] Rate-limit numbers in §12 (derived starting points, not measured) — confirm as the v0
-      defaults or adjust before they're hardcoded anywhere.
+- [ ] Gadget-only attestation (§12, #63) — choose a server-verifiable, short-lived,
+      replay-resistant mechanism. Exact browser headers are defense in depth, not proof; public
+      JavaScript cannot safely contain a reusable secret. Public release stays blocked until the
+      mechanism is implemented in #64.
+- [ ] Service-protection limits in §12 — confirm initial concurrency/request controls or record
+      that measurement will set them before Phase 3. These protect shared infrastructure; they
+      are not end-user budgets and have nothing to do with BYK provider spend.
 - [ ] Privacy statement ownership and drafting timeline (architecture §8) — who writes it, due
       by which phase (must land before Phase 5's launch).
-- [ ] BAG/BRFA engagement timing — when to start that community process relative to Phase 5's
-      userscript release (it's slow and independent of engineering; starting early is usually
-      right even though it's tracked outside this plan).
 - [ ] Gadget-graduation criteria (Phase 8) — what "ready to propose as an official gadget" means
       concretely (usage volume? eval pass rate? time-in-userscript-stage minimum?), decided now
       so Phase 8 isn't a judgment call made under launch pressure.
@@ -148,8 +145,9 @@ Phase 2 starts building against them. Recommended agenda, one row = one decision
       application from Phase 0.
 
 **Exit criteria:** every commit from this point forward passes pre-commit locally and CI
-remotely; a recorded decision (an ADR-style entry in `docs/`, one per bullet above) exists for
-every alignment-session item — no open questions carried silently into Phase 2.
+remotely; each MVP alignment item above has an ADR-style record. The gadget-only decision is
+either implementable in Phase 2 or the public release is explicitly blocked. V1-only BYK and
+patch-proposer decisions are intentionally deferred to Phase 6.
 
 ---
 
@@ -163,19 +161,25 @@ every alignment-session item — no open questions carried silently into Phase 2
       provisioned `API_SERVER_KEY`, sync bundled skills (architecture §4).
 - [ ] Internal Toolforge continuous job running `hermes gateway run`, `HERMES_HOME` on NFS-backed
       `/data/project/...`, `cron.provider=builtin`; no public ingress or browser-facing CORS.
+- [ ] Interactive Hermes profile explicitly sets an empty toolset and startup verifies the
+      effective tool list is exactly empty, failing closed if upstream defaults leak in (#65).
 - [ ] Proxy backend skeleton as the single public Build Service webservice (architecture §4,
       §12): session minting endpoint and `POST /chat` stub proxying to the internal Hermes
       service with no product logic yet.
 - [ ] Secrets: provision `API_SERVER_KEY` via Toolforge envvars (§13). There is no BYK service
       secret or BYK envvar; end-user BYK arrives only as Phase 7 request data.
-- [ ] Exact-origin CORS and server-side `Origin` validation on the public proxy: allow
-      `https://fr.wikipedia.org` for MVP; reject missing, `null`, HTTP, unrelated, and
-      suffix-confusion origins before model work starts. Add exact origins as wikis onboard.
-      This is independent of Wikipedia login and must not introduce OAuth or identity forwarding.
+- [ ] Defense-in-depth browser checks: exact `Origin`, coherent `Referer`, and Fetch Metadata;
+      allow only `https://fr.wikipedia.org` for MVP and reject missing/`null`/HTTP/unrelated/
+      suffix-confusion values before model work starts (#31).
+- [ ] Server-verifiable gadget assertion from #63, verified before session lookup, fetches, or
+      model work; reject missing, invalid, expired, replayed, wrong-audience, and wrong-wiki
+      assertions (#64). Do not embed a reusable secret in the public gadget. The mechanism is
+      independent of Wikipedia login and forwards no Wikimedia identity.
 
-**Exit criteria:** a request from the allowed frwiki origin reaches the public proxy, the internal
-Hermes service, and LiftWing Qwen, then returns successfully. Disallowed browser origins are
-rejected and Hermes has no public route. No product logic beyond this pipe and caller boundary.
+**Exit criteria:** an attested request made through the frwiki userscript reaches the public
+proxy, internal Hermes service, and LiftWing Qwen. The equivalent copied request replayed from a
+direct client fails; disallowed browser origins fail; Hermes has no public route; the effective
+interactive tool list is empty. No product logic beyond this pipe and caller boundary.
 
 ---
 
@@ -195,8 +199,9 @@ feature is built on top of it.
       externally retrieved context item before it enters the prompt, including wiki content and
       tier-1 Toolhub records; warn-and-log by default, hard-block only the clearest patterns;
       content framed as untrusted data in the prompt itself.
-- [ ] Rate limiting at the proxy (§12): global in-flight concurrency cap (~8, per §3's
-      concurrency curve), per-session burst + sustained caps, and short-TTL non-identifying IP
+- [ ] Service protection at the proxy (§12): global in-flight concurrency cap (initially ~8,
+      pending measurement against §3's concurrency curve), per-session burst + sustained caps,
+      and short-TTL non-identifying IP
       counters only if Toolforge exposes a reliable client address. This is abuse mitigation,
       not authentication; no Wikipedia identity is collected.
 - [ ] Degradation chain (§14), MVP scope: retry-with-backoff → `llm-qwen36-27b` →
@@ -226,8 +231,8 @@ reviewed, not just designed — this phase produces working code, not another ro
       and frames results as untrusted context, then inserts relevant text. Tier 2 (end-user
       BYK-gated MCP tool-calling) is explicitly Phase 7.
 - [ ] On-wiki script: `User:<maintainer>/WAIT.js` on frwiki, calling only the proxy (never
-      `api_server` directly), sending no Wikimedia login/OAuth identity, and rendering per Phase
-      3's text-only rule.
+      `api_server` directly), obtaining/presenting the #63 gadget assertion, sending no Wikimedia
+      login/OAuth identity, and rendering per Phase 3's text-only rule.
 
 **Exit criteria:** a maintainer can use the userscript on frwiki and get real, useful answers
 across all four capabilities, tier-1 discovery included.
@@ -242,13 +247,15 @@ editors.
 **Tasks**
 
 - [ ] Eval suite v0 (§11): benchmark cases across all four capabilities, frwiki-scoped, including
-      the unsafe-code-suggestion checks from §9.8. Runs in CI (Phase 1's decision) and on
-      `cron.provider=builtin`'s schedule in production.
+      the unsafe-code-suggestion checks from §9.8. Deterministic fixture/mock tests run in GitHub
+      Actions; live LiftWing eval runs from Toolforge on schedule and before promotion. GitHub
+      Actions must not depend on LiftWing's public 100/hour, no-SLA path.
 - [ ] Watchdog wired to the alerting channel decided in Phase 1; dead-man's-switch-style heartbeat
       pattern for semantic failures (LiftWing unreachable, NFS/SQLite broken) that Kubernetes'
       own crash-restart can't catch.
-- [ ] Feedback affordance (👍/👎) in the gadget UI, piped to the proxy, feeding future eval-case
-      creation (§11) — collection starts in MVP even though the eval-authoring loop matures in V1.
+- [ ] Explicit optional feedback affordance (👍/👎) in the gadget UI, piped to the proxy and
+      reviewed before feeding future eval cases (§11). Do not infer feedback by tracking
+      rephrasing or other interaction behavior.
 - [ ] Publish the config layer (toolsets, prompts, cron/eval config) and the pinned Hermes
       version/commit (§8) — the auditability commitment starts at MVP launch, not later.
 - [ ] Privacy statement live (Phase 1 owner/timeline) before any release beyond the maintainer's
@@ -260,6 +267,8 @@ editors.
 - The userscript is live and usable on frwiki by real testers (not just the maintainer).
 - Eval, watchdog, and feedback are all running in production.
 - The privacy statement and published config/version pin are live.
+- Gadget-only enforcement passes #64's direct-client/replay security tests; exact-origin checks
+  alone do not satisfy launch readiness.
 - No BYK, no other wikis, no patch proposer, no discovery tier 2 — confirming MVP stayed
   in scope, not scope-crept into V1 territory.
 
@@ -278,12 +287,20 @@ are built on top of it.
       wiki-family-wide, not frwiki-specific — nothing to change there.)
 - [ ] Provider-scoping abstraction: the model-fallback chain (§14) already treats models as an
       ordered config list — this phase is mostly about confirming that holds, not rebuilding it.
+- [ ] Choose the supported end-user BYK provider/model allowlist. This is compatibility, not a
+      project-owned credential, spend budget, or cost-center decision (#21).
+- [ ] Choose and prove secure request-scoped credential ingress because pinned Hermes does not
+      currently accept a provider key in its HTTP request schema; shared env/config mutation is
+      forbidden (#66).
 - [ ] Transient end-user BYK contract (§6, §12): fixed provider/model allowlist, request-scoped
       credential handoff, mandatory redaction, no persistence, session isolation, and explicit
       fallback signals for missing credentials, provider rejection/quota, and unavailability.
+- [ ] Decide whether V1 includes the patch proposer at all and, only if it does, record its
+      trigger/credential model and isolation requirements (#62, #68).
 
-**Exit criteria:** adding a second wiki or a second model provider is a config change, verified
-by actually doing it once in a non-production/staging path before Phase 7 depends on it.
+**Exit criteria:** a second wiki is a config-scoped onboarding change, and request-scoped BYK
+ingress has been proven once in an isolated staging path before Phase 7 depends on it. The patch
+proposer is explicitly enabled with a safe model or explicitly omitted from V1.
 
 ---
 
@@ -296,14 +313,16 @@ by actually doing it once in a non-production/staging path before Phase 7 depend
 - [ ] End-user BYK request flow implemented for the supported provider/model allowlist (§6,
       §12): the credential remains client/request-scoped, is redacted before observability, and
       never enters Toolforge envvars, session persistence, files, metrics, feedback, or errors.
+- [ ] On-wiki BYK opt-in UI: no browser persistence, clear same-origin exposure warning,
+      scoped/revocable-key guidance, and corresponding privacy-statement update (#67).
 - [ ] Patch proposer (§6, §7, §11): implement only the credential/trigger model recorded in
-      Phase 1, with a real agent loop, curated toolset, and propose-only credential scope. It
-      never borrows an interactive user's BYK credential and remains disabled if the decision is
-      still open.
+      Phase 6, if enabled, with a real agent loop and curated toolset in an ephemeral isolated
+      job/worktree. It has no production mounts/secrets/deploy credentials, emits only a proposal
+      artifact, and never borrows an interactive user's BYK credential (#54, #68).
 - [ ] Discovery-mode tier 2 (§5, §10.4): narrow MCP toolset bound to `toolhub-evolved`, gated on
       transient end-user BYK availability, bounded tool calls per turn to protect Toolhub, and
-      falling back to tier 1 when no key is supplied or the user's provider rejects quota/is
-      unavailable.
+      explicitly orchestrating a fresh tier-1 LiftWing request when no key is supplied or the
+      user's provider rejects quota/is unavailable. This is not a config-only model fallback.
 - [ ] Security verification for BYK isolation: no credential appears in logs/traces/errors,
       credentials cannot cross sessions, unsupported providers/endpoints are rejected, and
       provider quota failures fall back without exposing secret material.
@@ -324,13 +343,13 @@ graduates to an official, community-reviewed gadget.
 
 - [ ] Onboard at least one additional wiki using Phase 6's abstraction — this is the real test
       that "composable" wasn't just a design intention.
-- [ ] Gadget-admin community review process, using the graduation criteria decided in Phase 1.
-- [ ] BAG/BRFA engagement resolved (started back in Phase 1/5 per the timing decision).
+- [ ] Gadget-admin community review and approval independently on both V1 wikis, using the
+      graduation criteria decided in Phase 1. Approval on one wiki does not cover another.
 - [ ] Re-run the full security review (§9) against the gadget-hosted version specifically — the
-      CSP/Third-Party-Resources risk profile (§16) changes slightly once it's a community-wide
-      gadget rather than a personal script, even though the code itself doesn't change.
+      audience, privacy, cross-origin API disclosure, and gadget-attestation boundary must be
+      checked independently for each community-wide gadget.
 
-**Exit criteria — V1 is done when:** WAIT is an official gadget on at least two wikis,
+**Exit criteria — V1 is done when:** WAIT is an approved official gadget on at least two wikis,
 end-user-BYK discovery tier 2 is live with its security controls, and composability has been
 exercised for real, not just designed. The patch proposer is live only if its separate model was
 approved; otherwise its explicitly disabled state is the recorded outcome.

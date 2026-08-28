@@ -3,8 +3,8 @@
 **WAIT** = Wiki Aware Intelligent Tool (full name spelled out once here; **WAIT** used
 throughout everywhere else, including the rest of this document).
 
-**Date:** 2026-08-28 · **Status:** building; patch-proposer credential model still open · **Supersedes:** all prior
-versions of this document
+**Date:** 2026-08-28 · **Status:** building; gadget attestation, Hermes BYK ingress, and the
+patch-proposer model remain open · **Supersedes:** all prior versions of this document
 
 ## Decision
 
@@ -22,19 +22,19 @@ model is decided) using Hermes's real agent loop.
 ### 1.1 Interactive tier
 
 **Interface: hosted on-wiki.** The script itself lives in user subpages first (e.g.
-`User:X/WAIT.js`), graduating later to an official `MediaWiki:Gadget-*.js`. **This is
-same-origin, not cross-origin resource loading** — meaningfully better than the "gadget fetches
-a script from Toolforge" pattern originally assumed. It resolves most of the Third-Party
-Resources Policy risk flagged earlier (§9): that policy targets *external resource loading*, and
-the script content never leaves wikipedia.org. What remains cross-origin is only the *runtime*
-API calls from that on-wiki script out to WAIT's proxy (§12) — the same narrower,
-already-precedented pattern `gitlab-content` uses. Track the policy's status regardless (§16),
-but this is a materially safer starting point than assumed.
+`User:X/WAIT.js`), graduating later to an official `MediaWiki:Gadget-*.js`. The executable script
+is therefore hosted on Wikipedia rather than loaded from Toolforge. Runtime API calls to WAIT's
+proxy are still cross-origin and must be disclosed and reviewed on every target wiki. The
+archived 2023 Third-party resources proposal is not an adopted policy and is not used as an
+approval or compliance claim in this plan.
 
 - Read-only chat, text-only rendering (§9.2–9.3, unchanged).
 - Session/toolset: empty toolset (§5), backed by `llm-qwen36-27b`/`llm-qwen3-14b`.
 - Access is independent of Wikipedia login state. The proxy receives no Wikimedia identity and
   uses no MediaWiki OAuth credential.
+- Product access is restricted to requests made by the installed Wikipedia userscript/gadget.
+  Browser headers alone cannot prove that property; the server-verifiable mechanism is the
+  blocking decision in §12 and issue #63.
 - Rollout path is now explicit and staged: personal userscript → official gadget. Each stage has
   its own review bar (self-review → gadget-admin community review).
 
@@ -75,7 +75,10 @@ Unchanged. Toolforge's default quota fits Hermes's measured footprint; Cloud VPS
 
 ## 5. Tool-calling handling (interactive tier)
 
-Empty toolset (`"tools": [], "includes": []`), config-level, not a Hermes patch — **default**.
+Empty toolset (`"tools": [], "includes": []`) is mandatory for the interactive profile.
+This is **not Hermes's upstream default**: the upstream API profile exposes powerful core tools.
+Startup must resolve the effective tool list, verify that it is exactly empty, and fail closed
+otherwise (issue #65). The V1 discovery profile is separate and is the only exception below.
 
 **One deliberate, narrow exception: tool discovery (§10.4).** When an end user supplies a
 compatible BYK credential for a tool-calling-capable model, the tool-discovery path gets a
@@ -96,18 +99,52 @@ here automatically pass through Hermes's own `tool_dispatch_helpers.py` injectio
 
 ## 6. BYK and maintenance-tier model backing
 
-**BYK means an end user brings their own provider credential.** It applies to the interactive
-tool-discovery tier only. WAIT passes the credential transiently from the on-wiki client through
-the proxy to the provider-capable Hermes session. It is never stored in Toolforge envvars,
-session state, files, logs, analytics, or public audit records. Provider billing and provider
-quota belong to that user, so WAIT has no BYK spend budget or cost-center tracking.
+**BYK means an end user brings their own provider credential.** It is an optional V1 enhancement
+for the interactive tool-discovery tier only; it is absent from MVP. Provider billing and quota
+belong to that user, so WAIT has no BYK spend budget or cost-center tracking.
 
-The automated patch proposer is different: scheduled work has no end user present and therefore
-cannot consume an arbitrary user's BYK credential. Its trigger and credential model is an
-explicit open decision: either it becomes a maintainer-triggered action using a transient
-maintainer-supplied key, or it receives a dedicated operator credential with separately approved
-cost controls. Until that decision is recorded, the patch proposer remains disabled. Do not call
-an operator credential “BYK.”
+The pinned Hermes HTTP API accepts provider/model selection but has no request-scoped provider
+credential field. Therefore the end-to-end BYK handoff described here is a requirement, not an
+existing Hermes capability. Issue #66 must choose and prove a secure ingress boundary (upstream
+change, maintained fork, or another isolated adapter) before implementation. It must never
+rewrite shared environment or config state per request. Once supported, the credential remains
+in memory for that request only and is excluded from Toolforge envvars, sessions, files, logs,
+analytics, errors, feedback, and public audit records.
+
+**Decided (#62): the patch proposer is maintainer-triggered, using a transient maintainer-
+supplied key, in the isolated ephemeral runtime defined by #68 — not the scheduled/operator-
+credential option, and not omitted from V1.**
+
+- **Trigger:** on-demand, invoked explicitly by a maintainer. No `cron.provider=builtin` entry
+  and no automatic schedule for V1 — a human decides when a run happens. Automatic/scheduled
+  generation (a dedicated operator credential, running unattended) was considered and rejected
+  for V1: it's the larger trust commitment for a brand-new capability on a public,
+  not-yet-gadget-reviewed tool, and this project has an established pattern of shipping the
+  narrow version first (personal userscript → gadget; discovery tier 1 → tier 2). Graduating to
+  scheduled generation is a future decision, gated on a track record, not a calendar date: a
+  documented number of maintainer-triggered runs with zero credential-scope or isolation
+  incidents.
+- **Credential storage/lifetime:** the maintainer supplies a transient provider key at
+  invocation time. It is never written to Toolforge envvars, session state, files, logs,
+  metrics, or public audit records, and does not outlive the single ephemeral run — destroyed
+  with the sandbox afterward (#68). It is explicitly not called "BYK" (that term is reserved for
+  the interactive tier's end-user-supplied credentials, §6 above) — this is an operator
+  credential, supplied by whoever triggers the run, not by an anonymous end user.
+- **Provider/model scope:** drawn from the same supported-provider compatibility allowlist as
+  end-user BYK (§21) rather than a second, divergent list — one compatibility surface to
+  maintain, not two.
+- **Repository/issue-tracker credential scope:** unchanged from §7 — dedicated, least-privilege,
+  scoped to WAIT's own repo/issue tracker, cannot merge, publish, deploy, alter branch
+  protection, or otherwise modify production. This is a separate credential from the transient
+  model-provider key above.
+- **Hard prerequisite regardless of the above:** #68 (runtime isolation from the production
+  gateway) must land before any production run. Credential scope alone doesn't stop Hermes's
+  own terminal/file tools from touching a mounted production checkout if the proposer runs in
+  the same context as the interactive gateway — #68 is what actually makes "proposal-only" true,
+  not just claimed.
+- **Never reads, retains, or reuses an interactive end-user's BYK credential** — the two
+  credential paths (interactive end-user BYK, maintainer-triggered proposer key) stay fully
+  separate.
 
 ## 7. Maintenance-tier toolset — curated, not default
 
@@ -116,9 +153,11 @@ an operator credential “BYK.”
 `clarify`.
 **Exclude:** all `browser_*`, all `ha_*`, `text_to_speech`, `image_generate`, `vision_analyze`,
 `cronjob`, `delegate_task`, `skill_manage`, `execute_code`.
-**Guardrail:** write access terminates at "open a proposal for human review," enforced by
-credential scope, not prompting. Credentials: dedicated, least-privilege, scoped to WAIT's
-own repo/issue tracker.
+**Guardrail:** the patch proposer runs in an ephemeral isolated job/worktree, without production
+runtime mounts, production secrets, or deployment credentials. Its only egress is a reviewable
+proposal artifact. Repository credentials are dedicated and least-privilege, but credential
+scope alone is insufficient: terminal/process/write tools could otherwise mutate the live local
+checkout or runtime before any proposal is opened. Issue #68 owns this isolation requirement.
 
 **Add `toolhub-evolved`'s `toolhub-creation` skill** (§10.4) — a portable agent skill for
 creating/validating a repo-owned `toolinfo.json`, copied directly into the maintenance tier's
@@ -232,17 +271,18 @@ proxy-side rather than hitting it on every mention of "is there a tool for X."
 - **Eval** — a fixed, versioned benchmark suite spanning all four product capabilities (§10),
   each case with either a reference answer or an LLM-judge rubric (correctness, no fabricated
   policy citations, no unsafe/backdoored code per §9.8). Runs on a schedule and before any
-  prompt/config change is promoted. Produces pass/fail + score per case; any regression vs. the
-  last-known-good baseline is the signal the patch proposer consumes.
+  prompt/config change is promoted. Live LiftWing runs execute from Toolforge, where WMCS traffic
+  is not constrained by the public 100/hour path; GitHub Actions runs deterministic fixtures or
+  mocks only. Produces pass/fail + score per case; any regression vs. the last-known-good baseline
+  is the signal the patch proposer consumes.
 - **Watchdog** — infrastructure health, not output quality: gateway process alive, `api_server`
   responding, LiftWing reachable within acceptable latency, Toolforge resource usage within
   quota, NFS/SQLite health. Runs frequently. **Alerting channel still undecided** — needs one
   (email, Phabricator task, or similar) before this is more than a dashboard nobody watches.
-- **Feedback** — a lightweight in-UI signal (e.g. 👍/👎 on a response) — compatible with
-  "read-only chat," since it's UI-local interaction with the proxy, not a wiki edit or a Hermes
-  tool call — plus implicit signals (immediate rephrasing/correction as a proxy for "that didn't
-  help"). Aggregated and surfaced to maintainers; the main purpose is **minting new eval cases**
-  from real friction, so eval's fixed set grows from actual usage instead of staying static.
+- **Feedback** — an explicit, optional in-UI signal (e.g. 👍/👎 on a response) — compatible with
+  "read-only chat," since it is UI-local interaction with the proxy, not a wiki edit or a Hermes
+  tool call. WAIT does not infer dissatisfaction by tracking rephrasing or other behavior.
+  Aggregation is a separate scheduled maintenance job; reviewed feedback can mint new eval cases.
 - **Patch proposer** — triggered by eval regressions or triaged feedback, drafts a proposal
   (prompt/config change, new eval case, or code fix) for human review. Never auto-merges (§7).
 
@@ -258,31 +298,33 @@ server-side. Enforces the link allowlist (§9.4) and injection scan (§9.5) **se
 just in client JS — a client-side-only check is inspectable and bypassable, so defense belongs
 on the server that actually talks to the model.
 
-**Caller boundary: exact-origin allowlist, not a wildcard.** Browsers call the proxy, never
-Hermes directly — Hermes has no public route at all (§4). CORS and server-side `Origin`
-validation both live on the proxy. For MVP the only allowed origin is exactly
-`https://fr.wikipedia.org` — not `*` and not the pattern `*.wikipedia.org` used in earlier drafts
-of this plan. Add exact origins one at a time as wikis are onboarded (§10.4's composability
-work). This boundary is independent of Wikipedia login state and must not introduce OAuth or
-identity forwarding. `Origin` validation is a browser-caller boundary, not cryptographic client
-attestation — a custom non-browser client can forge the header; direct (non-browser) clients are
-simply unsupported, and requests without an allowed origin are rejected before any model work
-starts. Rate limiting (below) is a separate, independent abuse control, not a substitute for
-this check.
+**Caller boundary: server-verifiable gadget attestation plus browser defenses.** Browsers call
+the proxy, never Hermes directly — Hermes has no public route at all (§4). WAIT's product
+requirement is stricter than CORS: a request is served only when the proxy can verify that it was
+made by the approved Wikipedia userscript/gadget. `Origin`, `Referer`, and Fetch Metadata checks
+remain mandatory defense in depth, with `https://fr.wikipedia.org` as the sole MVP origin, but a
+custom client can forge all of those headers. A reusable secret embedded in public JavaScript is
+also not proof. Public release is blocked until issue #63 records a WMF-controlled or otherwise
+server-verifiable, short-lived, audience-bound and replay-resistant assertion design, and issue
+#64 implements it. The design must remain independent of Wikipedia login state and must not
+forward Wikimedia usernames or introduce a login requirement.
 
-- `POST /chat` — request: `{ message, session_id?, context?: { page_title?, page_lang? },
-  byk?: { provider, model, api_key } }`.
+- `POST /chat` — request: `{ message, gadget_assertion, session_id?,
+  context?: { page_title?, page_lang? }, byk?: { provider, model, api_key } }`.
   Response: `{ session_id, reply, links?: [{title, url}] }` — links returned as **structured,
   pre-validated data** (already filtered per §9.4), not raw text the client has to parse and
   re-validate itself.
-- **BYK handling:** `byk` is optional, request-scoped secret material. The proxy must redact the
+- **Gadget assertion:** verified before session lookup, rate-limit accounting, external fetches,
+  or model work. Invalid, expired, replayed, wrong-audience, wrong-wiki, and missing assertions
+  receive a generic rejection. Exact encoding/issuance remains the #63 decision.
+- **BYK handling (V1 only):** `byk` is optional, request-scoped secret material. The proxy must redact the
   key before request logging and must not place it in the opaque session, Hermes persistence,
   traces, metrics, errors, or feedback. Supported providers/models remain an explicit V1
   compatibility decision (§6); no arbitrary endpoint URL is accepted from the browser.
 - **Session handling:** the proxy mints its own opaque session token for the browser to hold —
   Hermes's own session/memory-scoping headers (`X-Hermes-Session-Id`/`X-Hermes-Session-Key`)
   stay server-side, never exposed to the client.
-- **Rate limiting** (proposed starting point, tune against real usage — not a researched number):
+- **Service protection, not an end-user budget** (starting point, tune against measurements):
   per-session/IP request cap (e.g. tens per hour, generous for a help tool, not spam-friendly),
   plus a global in-flight concurrency cap at the proxy to protect the shared LiftWing latency
   curve (§3) regardless of Toolforge's own elevated quota.
@@ -312,14 +354,15 @@ Composable, config-driven rather than a single hardcoded path — a list the pro
 1. **Retry with backoff** — one or two retries within a tight timeout budget, for transient
    blips.
 2. **Model fallback chain** — an ordered, config-defined list of model IDs to try (e.g.
-   `llm-qwen36-27b` → `llm-qwen3-14b`, with a request-scoped BYK model selected only when the
-   user supplies one) — adding a supported provider/model is a compatibility change, not a
-   project spending decision. **The same mechanism governs §10.4's tier switch:** no BYK,
-   rejected/exhausted user quota, or unavailable provider → discovery mode falls back to tier 1
-   (proxy-side context stuffing), not a separate code path.
-3. **Visible wait state** — if latency is within §3's known concurrency-curve range, show a
+   `llm-qwen36-27b` → `llm-qwen3-14b`) — adding a supported provider/model is a compatibility
+   change, not a project spending decision.
+3. **V1 discovery orchestration** — when the user opts into BYK, attempt the isolated tier-2
+   request; classify missing/rejected/exhausted/unavailable provider failures; then start a fresh
+   tier-1 LiftWing request with proxy-fetched Toolhub context. This is application orchestration,
+   not another entry in one provider/model fallback list.
+4. **Visible wait state** — if latency is within §3's known concurrency-curve range, show a
    "thinking, this may take a moment" state rather than erroring immediately.
-4. **Graceful failure message** as the last resort — explicit, honest unavailability, not a
+5. **Graceful failure message** as the last resort — explicit, honest unavailability, not a
    silent hang or a cryptic error. Necessary given LiftWing's no-SLA status (§3).
 
 ## 15. Repository and deployment
@@ -331,22 +374,20 @@ Composable, config-driven rather than a single hardcoded path — a list the pro
 - **Everything deploys on Toolforge** (§4) — Hermes as an internal continuous job and the proxy
   backend (§12) as the single public Build Service webservice.
 
-## 16. Known risks (tracked, not blocking)
+## 16. Known risks and release blockers
 
 - **SQLite over NFS** — accepted risk, single-writer pattern, worth an early smoke test.
 - **LiftWing: experimental, no SLA, no tool-calling roadmap** — §14 exists because of this.
-- **CSP/Third-Party Resources Policy** — meaningfully de-risked by on-wiki script hosting
-  (§1.1), but the proxy API calls remain cross-origin; track the policy's status regardless.
+- **Gadget-only enforcement is a release blocker** (§12) — browser headers are spoofable and
+  public JavaScript cannot safely hold a reusable secret; #63 and #64 must close before release.
 - **Gadget-admin community review timing** is now a real, staged dependency (userscript → gadget,
   §1.1) rather than an undecided rollout question.
-- **End-user BYK secret handling** (§6, §12) — credentials cross the proxy by design and require
-  strict redaction, no persistence, session isolation, and provider allowlisting.
+- **End-user BYK ingress is unimplemented upstream** (§6, §12) — #66 blocks all V1 BYK work.
 - **Patch-proposer credential/trigger model is undecided** (§6) — the worker remains disabled
   until a maintainer-triggered or operator-credential model is explicitly selected.
 - **Watchdog alerting channel undecided** (§11).
 - **`toolhub-evolved`'s 60 req/min limit is a new shared dependency** (§10.4) — same shape of
   risk as LiftWing's concurrency curve (§3), smaller blast radius, still worth caching against.
-- **Wikimedia community process (BAG/BRFA)** — still entirely outside this document's scope.
 - **Code-suggestion supply-chain risk (§9.8)** — mitigated, not eliminated; the strongest
   backstop is the gadget-admin review step at graduation, which is now a confirmed part of the
   rollout plan rather than a nice-to-have.
@@ -357,23 +398,22 @@ Composable, config-driven rather than a single hardcoded path — a list the pro
    `API_SERVER_KEY`, sync skills.
 2. Internal Toolforge continuous job running `hermes gateway run`, NFS `HERMES_HOME`,
    `cron.provider=builtin` driving eval/watchdog/feedback (§11).
-3. Single public proxy webservice (§12) via Build Service: exact Wikipedia-origin enforcement,
-   session minting, server-side link allowlist + injection scanning, rate limiting, and the
-   degradation chain (§14).
-4. Interactive-tier session: empty toolset and LiftWing Qwen; no browser-facing Hermes CORS —
-   origin enforcement lives entirely on the proxy (§12), exact-origin allowlist, MVP:
-   `https://fr.wikipedia.org` only, not a wildcard.
+3. Single public proxy webservice (§12) via Build Service: server-verifiable gadget assertion,
+   exact Wikipedia browser-header checks, session minting, server-side link allowlist + injection
+   scanning, service-protection limits, and the degradation chain (§14).
+4. Interactive-tier session: explicitly configured and startup-verified empty toolset with
+   LiftWing Qwen; Hermes has no browser-facing route or CORS configuration.
 5. On-wiki script (user subpage first): text-only rendering, calls only the proxy, never
    `api_server` directly.
 6. Eval suite (§11): benchmark cases across all four product capabilities (§10), including
    unsafe-code-suggestion checks (§9.8).
 7. Watchdog: pick an alerting channel; wire health checks.
 8. Feedback affordance in the UI; pipeline into eval-case creation.
-9. Decide the patch-proposer trigger/credential model (§6); only then enable its curated toolset
-   (§7), `toolhub-creation` skill (§7, §10.4), and propose-only guardrail.
+9. Decide the patch-proposer trigger/credential model (§6); if enabled, isolate its job/runtime
+   per §7 before enabling its curated toolset or `toolhub-creation` skill.
 9a. Discovery-mode session (§5, §10.4): tier-1 proxy-side `toolhub-evolved` integration first
     (works for everyone, no BYK); tier-2 narrow MCP toolset gated on transient end-user BYK,
-    bounded tool calls per turn, and falling back to tier 1 via the same chain as §14.
+    bounded tool calls per turn, and explicit tier-2-to-tier-1 orchestration per §14.
 10. Repo setup: GitHub primary + GitLab mirror (§15); publish WAIT's own config layer and
     pinned Hermes version (§8).
 11. Draft the Toolforge privacy statement before any public launch (§8).
@@ -382,7 +422,7 @@ Composable, config-driven rather than a single hardcoded path — a list the pro
     no persistence, session isolation, and quota/unavailability fallback (§6, §12).
 14. Wire `toolhub-evolved` tier 1 (proxy → MCP server, plain HTTP) and tier 2 (narrow MCP
     toolset, BYK-gated) per §10.4.
-15. Separately track: BAG/BRFA bot approval, gadget-admin review for the graduation step (§1.1).
+15. Complete gadget-admin review independently on every wiki used for V1 graduation (§1.1).
 
 ---
 
@@ -413,11 +453,9 @@ Composable, config-driven rather than a single hardcoded path — a list the pro
 - [Machine Learning/LiftWing/Large Language Models/Wikimania 2026](https://wikitech.wikimedia.org/wiki/Machine_Learning/LiftWing/Large_Language_Models/Wikimania_2026) ·
   [Machine Learning/LiftWing/Large Language Models](https://wikitech.wikimedia.org/wiki/Machine_Learning/LiftWing/Large_Language_Models)
 
-## Appendix D — Gadget/CSP citations
+## Appendix D — Gadget/CORS citation
 
-- [Manual:CORS — MediaWiki](https://www.mediawiki.org/wiki/Manual:CORS) ·
-  [Talk:2023 Third-party resources policy draft — Meta-Wiki](https://meta.wikimedia.org/wiki/Talk:Third-party_resources_policy) ·
-  [Tool:Gitlab-content — Wikitech](https://wikitech.wikimedia.org/wiki/Tool:Gitlab-content)
+- [Manual:CORS — MediaWiki](https://www.mediawiki.org/wiki/Manual:CORS)
 
 ## Appendix E — Wikimedia project domain citations
 

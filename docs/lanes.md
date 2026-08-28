@@ -14,12 +14,12 @@ tracking issues (#1–#11) are unlabeled by lane — they span both.
 ## The split logic
 
 **Lane A** leans infra/ops/backend: Toolforge, the Hermes gateway (`gateway/`), eval/watchdog,
-the maintenance tier (patch proposer), and the alignment/governance decisions that are
-infra-flavored (Toolforge naming, watchdog channel, patch-proposer credentials, BAG/BRFA timing).
+the maintenance tier (patch proposer), and the alignment decisions that are infra-flavored
+(Toolforge naming, watchdog channel, patch-proposer credentials and isolation).
 
 **Lane B** leans product/client-facing: the proxy (`proxy/`), the on-wiki gadget (`gadget/`),
 the four interactive-tier product capabilities, and the alignment/governance decisions that are
-product-flavored (rate limits, privacy statement, end-user BYK compatibility,
+product-flavored (service-protection controls, privacy statement, end-user BYK compatibility,
 gadget-graduation criteria, licensing).
 
 This isn't a rigid architectural law — it's a *task-grouping* heuristic chosen because `gateway/`
@@ -61,37 +61,38 @@ before submitting regardless.
 
 No dependency between them — both are external, one-off setup actions.
 
-### Phase 1 — Core repo tooling & alignment (15 issues)
+### Phase 1 — Core repo tooling & alignment (13 issues)
 | Lane A | Lane B |
 |---|---|
 | #14 `.pre-commit-config.yaml` | #15 pre-push hook |
 | #16 CI workflow | #18 GH/GitLab naming decision |
-| #17 branch protection required check *(after #16)* | #22 rate-limit numbers decision |
+| #17 branch protection required check *(after #16)* | #22 service-protection controls decision |
 | #19 Toolforge tool name decision | #23 privacy-statement owner/deadline |
-| #20 watchdog alerting channel decision | #21 end-user BYK provider/model compatibility |
-| #24 BAG/BRFA timing decision | #25 gadget-graduation criteria |
+| #20 watchdog alerting channel decision | #25 gadget-graduation criteria |
 | #61 draft `gates.toml` *(after #16)* | #26 license-split confirmation |
-| #62 patch-proposer trigger/credential decision | |
+| | #63 gadget-only attestation decision |
 
 **Sequencing:** #17 strictly after #16 (same lane). #61 strictly after #16. #15 should start once
 #14's lint/format tool choices are settled — light cross-lane handoff, not a hard block (both
 touch different files, so parallel drafting + reconcile-at-merge is fine if timing is tight).
 
-### Phase 2 — Infrastructure & deployment skeleton (5 issues)
+### Phase 2 — Infrastructure & deployment skeleton (7 issues)
 | Lane A | Lane B |
 |---|---|
 | #27 first-boot init script | #29 proxy backend skeleton |
 | #28 Hermes as internal Toolforge continuous job | #31 Origin/CORS enforcement on the proxy |
 | #30 provision `API_SERVER_KEY` via envvars | |
+| #65 verify empty Hermes interactive toolset | #64 implement gadget-only attestation |
 
 **Sequencing:** both lanes need #30's key to exist for an actual end-to-end round-trip test, but
 each can build their own side first (init script / proxy skeleton) without it. Land #30 early.
+#64 is blocked by #63. #31 is mandatory defense in depth but does not satisfy #64 by itself.
 
 ### Phase 3 — Security & guardrails (7 issues)
 | Lane A | Lane B |
 |---|---|
 | #32 text-only rendering (gadget) | #34 input-side injection scanning |
-| #33 link allowlist, server-side | #35 rate limiting at the proxy |
+| #33 link allowlist, server-side | #35 proxy service-protection controls |
 | #37 code-suggestion disclaimer | #36 MVP degradation chain |
 
 **`lane:joint`:** #38 security review pass — do after both columns land, not before.
@@ -123,30 +124,33 @@ up once its own column is done.
 
 Balanced 3/3, no hard sequencing between the two columns.
 
-### Phase 6 — Composability foundations (3 issues)
+### Phase 6 — Composability foundations (6 issues)
 | Lane A | Lane B |
 |---|---|
 | #51 confirm model-fallback chain is provider-agnostic | #50 wiki-scoping abstraction |
-| | #52 transient end-user BYK contract |
+| #62 patch-proposer inclusion/credential decision | #21 end-user BYK provider/model compatibility |
+| #66 design secure Hermes BYK ingress | #52 transient end-user BYK contract |
 
 Small phase — 1/2 follows the actual gateway-versus-proxy ownership.
 
-### Phase 7 — End-user BYK and gated features (4 issues)
+### Phase 7 — End-user BYK and gated features (6 issues)
 | Lane A | Lane B |
 |---|---|
-| #54 patch proposer *(blocked on #62)* | #53 transient end-user BYK request flow |
+| #54 patch proposer *(blocked on #62 and #68)* | #53 transient end-user BYK request flow |
+| #68 isolate patch proposer runtime | #67 on-wiki BYK opt-in/security UI |
 | | #55 discovery-mode tier 2 with end-user BYK |
 | | #56 BYK isolation and fallback security verification |
 
-**Sequencing:** #52 defines the contract before this phase. Lane B lands #53 before #55, then
-#56 verifies both. Lane A can implement #54 only after #62 records a patch-proposer credential
-model; #54 never depends on or consumes #53's interactive user keys.
+**Sequencing:** #21, #66, and #52 define and prove the contract before this phase. Lane B lands
+#53 and #67 before #55, then #56 verifies the full browser-to-provider path and explicit tier-1
+fallback. Lane A implements #54 only if #62 enables it, and #68 must prove isolation before it
+runs with write/terminal tools; #54 never depends on or consumes #53's interactive user keys.
 
-### Phase 8 — Multi-wiki onboarding & gadget graduation (4 issues — V1 done here)
+### Phase 8 — Multi-wiki onboarding & gadget graduation (3 issues — V1 done here)
 | Lane A | Lane B |
 |---|---|
-| #59 resolve BAG/BRFA engagement | #57 onboard a second wiki |
-| #60 re-run full security review for gadget context | #58 gadget-admin community review |
+| #60 re-run full security review for each gadget context | #57 onboard a second wiki |
+| | #58 gadget-admin approval on both wikis |
 
 ## Rebalancing
 
