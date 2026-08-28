@@ -277,8 +277,23 @@ proxy-side rather than hitting it on every mention of "is there a tool for X."
   is the signal the patch proposer consumes.
 - **Watchdog** — infrastructure health, not output quality: gateway process alive, `api_server`
   responding, LiftWing reachable within acceptable latency, Toolforge resource usage within
-  quota, NFS/SQLite health. Runs frequently. **Alerting channel still undecided** — needs one
-  (email, Phabricator task, or similar) before this is more than a dashboard nobody watches.
+  quota, NFS/SQLite health. Runs frequently.
+
+  **Decided (#20): alerting is a pluggable notifier interface, not a single hardcoded channel.**
+  A minimal contract — one function, given an event (check name, status, timestamp, detail
+  message), returns whether delivery succeeded — that each channel implements independently.
+  Watchdog's health-check logic never branches on *which* channel is active; it just calls every
+  configured notifier with the same event. This keeps the failure-detection layer (§16's
+  dead-man's-switch pattern — an external heartbeat, so the alert fires on a *missed* ping, not
+  a self-report that can't fire if the whole gateway is wedged) fully independent of the
+  delivery layer: swapping or adding a channel never touches how a failure is detected, only how
+  it's announced.
+
+  Config declares a list of active channels (each entry: `type` + that type's own settings) —
+  more than one can run simultaneously, e.g. email *and* a later-added channel at once, not an
+  either/or selection. **V1 ships exactly one channel implementation: `email`.** Additional
+  channels (Phabricator task, IRC, webhook, ...) are added later purely as new implementations
+  of the same notifier contract — no change to watchdog's own check/detection code required.
 - **Feedback** — an explicit, optional in-UI signal (e.g. 👍/👎 on a response) — compatible with
   "read-only chat," since it is UI-local interaction with the proxy, not a wiki edit or a Hermes
   tool call. WAIT does not infer dissatisfaction by tracking rephrasing or other behavior.
