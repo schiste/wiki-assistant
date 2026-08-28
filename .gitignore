@@ -23,3 +23,7 @@ build/
 .aethyme/generated/experience-status.md
 .aethyme/generated/experience-telemetry.jsonl
 # aethyme-broker:end
+
+# Runtime lock state not yet covered by the managed block above (observed
+# during broker smoke-testing on 2026-08-28) — machine-local, not policy.
+.aethyme/locks/

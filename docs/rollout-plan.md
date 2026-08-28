@@ -15,6 +15,11 @@ own content license. Apply per-directory (e.g. a `LICENSE` at repo root for code
 `CC-BY-SA-4.0.txt` + a note in `docs/`/`prompts/` directories) rather than one blanket file —
 confirm the exact split in Phase 1's alignment session.
 
+**Running two agents in parallel:** every phase below is split into two lanes (infra/gateway vs.
+proxy/gadget/product) so two agents can work concurrently without colliding, coordinated through
+[Aethyme](../.aethyme/config.toml)'s broker. See [`docs/lanes.md`](lanes.md) for the full
+per-phase lane table, sequencing notes, and the Aethyme workflow.
+
 ---
 
 ## Epics
