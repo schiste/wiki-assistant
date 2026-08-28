@@ -13,6 +13,7 @@ from proxy.app import (
     ProxyConfig,
     UpstreamUnavailable,
     create_application,
+    extract_wiki_links,
 )
 
 
@@ -282,6 +283,35 @@ class ProxyApplicationTest(unittest.TestCase):
         self.assertNotEqual(session_token, hermes_session_key)
         self.assertNotIn(hermes_session_id, response["body"])
         self.assertNotIn(hermes_session_key, response["body"])
+
+    def test_chat_response_carries_only_validated_wiki_links(self):
+        client = RecordingHermesClient(
+            reply=(
+                "See https://fr.wikipedia.org/wiki/Article_principal, "
+                "https://evil.com/wikipedia.org, and javascript:alert(1)."
+            )
+        )
+        application = create_application(
+            self.config, client, verify_attestation=lambda environ, body: None
+        )
+
+        response = self.request(
+            application,
+            "POST",
+            "/chat",
+            {"message": "Question", "gadget_assertion": "test-only"},
+        )
+
+        self.assertEqual(response["status"], "200 OK")
+        self.assertEqual(
+            response["json"]["links"],
+            [
+                {
+                    "title": "Article principal",
+                    "url": "https://fr.wikipedia.org/wiki/Article_principal",
+                }
+            ],
+        )
 
     def test_existing_proxy_session_maps_to_stable_distinct_hermes_values(self):
         client = RecordingHermesClient()
@@ -706,6 +736,155 @@ class ProxyApplicationTest(unittest.TestCase):
         captured["body"] = response_body
         captured["json"] = json.loads(response_body) if response_body else None
         return captured
+
+
+class ExtractWikiLinksTest(unittest.TestCase):
+    def test_extracts_a_valid_article_link_with_decoded_title(self):
+        links = extract_wiki_links(
+            "See https://fr.wikipedia.org/wiki/Article_principal for context."
+        )
+
+        self.assertEqual(
+            links,
+            [
+                {
+                    "title": "Article principal",
+                    "url": "https://fr.wikipedia.org/wiki/Article_principal",
+                }
+            ],
+        )
+
+    def test_decodes_percent_encoded_titles(self):
+        links = extract_wiki_links("https://en.wikipedia.org/wiki/Caf%C3%A9")
+
+        self.assertEqual(links, [{"title": "Café", "url": "https://en.wikipedia.org/wiki/Caf%C3%A9"}])
+
+    def test_allows_non_article_namespaces_other_than_special(self):
+        for url, title in [
+            ("https://en.wikipedia.org/wiki/Template:Infobox", "Template:Infobox"),
+            ("https://en.wikipedia.org/wiki/Wikipedia:Policy", "Wikipedia:Policy"),
+            ("https://en.wikipedia.org/wiki/Category:People", "Category:People"),
+        ]:
+            with self.subTest(url=url):
+                self.assertEqual(
+                    extract_wiki_links(url), [{"title": title, "url": url}]
+                )
+
+    def test_rejects_substring_domain_bypass(self):
+        self.assertEqual(
+            extract_wiki_links("https://evil.com/wikipedia.org/wiki/X"), []
+        )
+
+    def test_rejects_missing_dot_boundary_prefix(self):
+        self.assertEqual(
+            extract_wiki_links("https://evilwikipedia.org/wiki/X"), []
+        )
+
+    def test_rejects_missing_dot_boundary_suffix(self):
+        self.assertEqual(
+            extract_wiki_links("https://wikipedia.org.evil.com/wiki/X"), []
+        )
+
+    def test_rejects_non_https_schemes(self):
+        for url in [
+            "http://fr.wikipedia.org/wiki/Article",
+            "javascript:alert(1)",
+            "ftp://fr.wikipedia.org/wiki/Article",
+        ]:
+            with self.subTest(url=url):
+                self.assertEqual(extract_wiki_links(url), [])
+
+    def test_rejects_toolforge_family_domains(self):
+        for url in [
+            "https://wikiassistant.wmcloud.org/wiki/X",
+            "https://tools.wmflabs.org/wiki/X",
+            "https://wiki-assistant.toolforge.org/wiki/X",
+        ]:
+            with self.subTest(url=url):
+                self.assertEqual(extract_wiki_links(url), [])
+
+    def test_rejects_query_strings_and_fragments(self):
+        for url in [
+            "https://fr.wikipedia.org/wiki/Article?action=edit",
+            "https://fr.wikipedia.org/wiki/Article#Section",
+        ]:
+            with self.subTest(url=url):
+                self.assertEqual(extract_wiki_links(url), [])
+
+    def test_rejects_the_named_special_userlogin_exploit(self):
+        self.assertEqual(
+            extract_wiki_links(
+                "https://fr.wikipedia.org/wiki/Special:UserLogin?"
+                "returnto=Special:UserRights"
+            ),
+            [],
+        )
+
+    def test_rejects_special_namespace_even_without_a_query_string(self):
+        self.assertEqual(
+            extract_wiki_links("https://en.wikipedia.org/wiki/Special:UserLogin"), []
+        )
+
+    def test_rejects_non_article_paths(self):
+        for url in [
+            "https://fr.wikipedia.org/",
+            "https://fr.wikipedia.org/w/index.php",
+            "https://fr.wikipedia.org/wiki/Article/Sub/Path",
+        ]:
+            with self.subTest(url=url):
+                self.assertEqual(extract_wiki_links(url), [])
+
+    def test_deduplicates_repeated_urls(self):
+        reply = (
+            "https://fr.wikipedia.org/wiki/Article and again "
+            "https://fr.wikipedia.org/wiki/Article."
+        )
+
+        self.assertEqual(
+            extract_wiki_links(reply),
+            [{"title": "Article", "url": "https://fr.wikipedia.org/wiki/Article"}],
+        )
+
+    def test_strips_trailing_sentence_punctuation(self):
+        for reply, url in [
+            (
+                "See https://fr.wikipedia.org/wiki/Article.",
+                "https://fr.wikipedia.org/wiki/Article",
+            ),
+            (
+                "(https://fr.wikipedia.org/wiki/Article)",
+                "https://fr.wikipedia.org/wiki/Article",
+            ),
+            (
+                "https://fr.wikipedia.org/wiki/Article, and more",
+                "https://fr.wikipedia.org/wiki/Article",
+            ),
+        ]:
+            with self.subTest(reply=reply):
+                self.assertEqual(extract_wiki_links(reply)[0]["url"], url)
+
+    def test_accepts_every_allowed_wiki_domain(self):
+        domains = [
+            "wikipedia.org",
+            "wikimedia.org",
+            "wikidata.org",
+            "wiktionary.org",
+            "wikisource.org",
+            "wikiquote.org",
+            "wikinews.org",
+            "wikibooks.org",
+            "wikiversity.org",
+            "wikivoyage.org",
+            "wikispecies.org",
+            "wikifunctions.org",
+            "mediawiki.org",
+        ]
+        for domain in domains:
+            url = f"https://{domain}/wiki/Article"
+            with self.subTest(domain=domain):
+                self.assertEqual(
+                    extract_wiki_links(url), [{"title": "Article", "url": url}]
+                )
 
 
 if __name__ == "__main__":

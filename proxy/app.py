@@ -25,6 +25,92 @@ SESSION_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
 StartResponse = Callable[[str, list[tuple[str, str]]], object]
 AttestationVerifier = Callable[[Mapping[str, object], Mapping[str, object]], None]
 
+# Architecture §9.4's exact domain list. Deliberately excludes wmcloud.org, wmflabs.org, and
+# toolforge.org — Toolforge tool pages are maintainer-submitted content, a different trust
+# level than the core Wikimedia projects below, not a canonical article destination.
+ALLOWED_WIKI_DOMAINS = (
+    "wikipedia.org",
+    "wikimedia.org",
+    "wikidata.org",
+    "wiktionary.org",
+    "wikisource.org",
+    "wikiquote.org",
+    "wikinews.org",
+    "wikibooks.org",
+    "wikiversity.org",
+    "wikivoyage.org",
+    "wikispecies.org",
+    "wikifunctions.org",
+    "mediawiki.org",
+)
+# Bare URLs the model's own free-text reply may contain — Hermes has no tool-calling for the
+# interactive tier (§5), so a link only ever reaches here as literal URL text the model wrote,
+# never as structured output. Trailing punctuation is trimmed at extraction time so a URL at
+# the end of a sentence doesn't swallow the closing period/comma/parenthesis into the match.
+BARE_URL_PATTERN = re.compile(r"https?://[^\s<>\"]+")
+TRAILING_PUNCTUATION_PATTERN = re.compile(r"[.,;:!?)\]}>]+$")
+ARTICLE_PATH_PATTERN = re.compile(r"^/wiki/([^/]+)$")
+
+
+def _is_allowed_wiki_hostname(hostname: str) -> bool:
+    # Dot-boundary match, never a substring check — "evilwikipedia.org" must not pass just
+    # because it ends with the letters "wikipedia.org" (architecture §9.4's own stated bypass).
+    return any(
+        hostname == domain or hostname.endswith(f".{domain}")
+        for domain in ALLOWED_WIKI_DOMAINS
+    )
+
+
+def _extract_article_title(path: str) -> str | None:
+    match = ARTICLE_PATH_PATTERN.fullmatch(path)
+    if match is None:
+        return None
+    encoded_title = match.group(1)
+    title = urllib.parse.unquote(encoded_title).replace("_", " ")
+    # Special: is the one namespace the issue names explicitly as dangerous (login, deletion,
+    # user-rights flows) — reject it by its canonical English name even though the strict
+    # no-query-string rule below already closes the specific exploit example
+    # (Special:UserLogin?returnto=...) on its own. Other namespaces (Template:, Wikipedia:,
+    # Category:) stay allowed — WAIT's own product scope needs to cite template/policy pages,
+    # not just (Main)-namespace articles.
+    if title.lower().startswith("special:"):
+        return None
+    return title
+
+
+def _validate_wiki_link(raw_url: str) -> tuple[str, str] | None:
+    try:
+        parsed = urllib.parse.urlsplit(raw_url)
+    except ValueError:
+        return None
+    if parsed.scheme != "https":
+        return None
+    if not parsed.hostname or not _is_allowed_wiki_hostname(parsed.hostname):
+        return None
+    if parsed.query or parsed.fragment or parsed.username or parsed.password:
+        return None
+    title = _extract_article_title(parsed.path)
+    if title is None:
+        return None
+    canonical_url = f"https://{parsed.hostname}{parsed.path}"
+    return title, canonical_url
+
+
+def extract_wiki_links(reply_text: str) -> list[dict[str, str]]:
+    links: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for match in BARE_URL_PATTERN.finditer(reply_text):
+        candidate = TRAILING_PUNCTUATION_PATTERN.sub("", match.group(0))
+        validated = _validate_wiki_link(candidate)
+        if validated is None:
+            continue
+        title, canonical_url = validated
+        if canonical_url in seen_urls:
+            continue
+        seen_urls.add(canonical_url)
+        links.append({"title": title, "url": canonical_url})
+    return links
+
 
 class RequestRejected(Exception):
     def __init__(self, status: str, code: str, message: str):
@@ -310,7 +396,11 @@ class ProxyApplication:
         return self._json_response(
             start_response,
             "200 OK",
-            {"session_id": session_token, "reply": reply, "links": []},
+            {
+                "session_id": session_token,
+                "reply": reply,
+                "links": extract_wiki_links(reply),
+            },
             self._cors_response_headers(environ),
         )
 
