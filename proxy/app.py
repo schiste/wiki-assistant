@@ -509,7 +509,8 @@ class ProxyApplication:
                 "400 Bad Request", "invalid_session", "session_id is invalid"
             )
 
-        allowed, retry_after_seconds = self._session_rate_limiter.check(session_token)
+        rate_limit_key = self._derive_session_value("rate-limit", session_token)
+        allowed, retry_after_seconds = self._session_rate_limiter.check(rate_limit_key)
         if not allowed:
             raise RequestRejected(
                 "429 Too Many Requests",

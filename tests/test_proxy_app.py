@@ -5,6 +5,7 @@ import threading
 import time
 import unittest
 import urllib.error
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from proxy.app import (
@@ -68,6 +69,53 @@ class ProxyApplicationTest(unittest.TestCase):
             response["headers"]["Access-Control-Allow-Origin"],
             "https://fr.wikipedia.org",
         )
+
+    def test_attestation_rejection_precedes_rate_limit_and_admission(self):
+        class RecordingRateLimiter:
+            def __init__(self):
+                self.keys = []
+
+            def check(self, rate_limit_key):
+                self.keys.append(rate_limit_key)
+                return True, 0.0
+
+        class RecordingAdmissionGate:
+            def __init__(self):
+                self.calls = 0
+
+            @contextmanager
+            def admit(self):
+                self.calls += 1
+                yield 0.0
+
+        limiter = RecordingRateLimiter()
+        gate = RecordingAdmissionGate()
+        client = RecordingHermesClient()
+        application = create_application(
+            self.config,
+            client,
+            admission_gate=gate,
+            session_rate_limiter=limiter,
+        )
+
+        response = self.request(
+            application,
+            "POST",
+            "/chat",
+            {
+                "message": "Question",
+                "gadget_assertion": "untrusted",
+                "session_id": "a" * 43,
+            },
+        )
+
+        self.assertEqual(response["status"], "503 Service Unavailable")
+        self.assertEqual(
+            response["json"]["error"]["code"], "gadget_attestation_unavailable"
+        )
+        self.assertEqual(limiter.keys, [])
+        self.assertEqual(gate.calls, 0)
+        self.assertEqual(client.calls, [])
 
     def test_valid_browser_metadata_reaches_attestation(self):
         client = RecordingHermesClient()
@@ -170,11 +218,7 @@ class ProxyApplicationTest(unittest.TestCase):
             {"HTTP_ACCESS_CONTROL_REQUEST_METHOD": "post"},
             {"HTTP_ACCESS_CONTROL_REQUEST_HEADERS": ""},
             {"HTTP_ACCESS_CONTROL_REQUEST_HEADERS": "Authorization"},
-            {
-                "HTTP_ACCESS_CONTROL_REQUEST_HEADERS": (
-                    "Content-Type, X-Wait-Assertion"
-                )
-            },
+            {"HTTP_ACCESS_CONTROL_REQUEST_HEADERS": ("Content-Type, X-Wait-Assertion")},
         ]
 
         for preflight_headers in invalid_preflights:
@@ -434,6 +478,40 @@ class ProxyApplicationTest(unittest.TestCase):
         self.assertIn("Retry-After", second["headers"])
         self.assertEqual(len(client.calls), 1)
 
+    def test_session_rate_limit_uses_a_derived_key_not_the_raw_session_token(self):
+        class RecordingRateLimiter:
+            def __init__(self):
+                self.keys = []
+
+            def check(self, rate_limit_key):
+                self.keys.append(rate_limit_key)
+                return True, 0.0
+
+        limiter = RecordingRateLimiter()
+        application = create_application(
+            self.config,
+            RecordingHermesClient(),
+            verify_attestation=lambda environ, body: None,
+            session_rate_limiter=limiter,
+        )
+        session_token = "f" * 43
+
+        response = self.request(
+            application,
+            "POST",
+            "/chat",
+            {
+                "message": "Question",
+                "gadget_assertion": "test-only",
+                "session_id": session_token,
+            },
+        )
+
+        self.assertEqual(response["status"], "200 OK")
+        self.assertEqual(len(limiter.keys), 1)
+        self.assertNotEqual(limiter.keys[0], session_token)
+        self.assertRegex(limiter.keys[0], r"^[0-9a-f]{64}$")
+
     def test_session_burst_cap_is_scoped_per_session_not_global(self):
         client = RecordingHermesClient()
         limiter = SessionRateLimiter(max_requests=1, window_seconds=3600)
@@ -630,9 +708,7 @@ class ProxyApplicationTest(unittest.TestCase):
             captured["request"] = request
             captured["timeout"] = timeout
             return io.BytesIO(
-                json.dumps(
-                    {"choices": [{"message": {"content": "Réponse"}}]}
-                ).encode()
+                json.dumps({"choices": [{"message": {"content": "Réponse"}}]}).encode()
             )
 
         client = HermesClient(self.config)
@@ -892,7 +968,9 @@ class ExtractWikiLinksTest(unittest.TestCase):
     def test_decodes_percent_encoded_titles(self):
         links = extract_wiki_links("https://en.wikipedia.org/wiki/Caf%C3%A9")
 
-        self.assertEqual(links, [{"title": "Café", "url": "https://en.wikipedia.org/wiki/Caf%C3%A9"}])
+        self.assertEqual(
+            links, [{"title": "Café", "url": "https://en.wikipedia.org/wiki/Caf%C3%A9"}]
+        )
 
     def test_allows_non_article_namespaces_other_than_special(self):
         for url, title in [
@@ -911,9 +989,7 @@ class ExtractWikiLinksTest(unittest.TestCase):
         )
 
     def test_rejects_missing_dot_boundary_prefix(self):
-        self.assertEqual(
-            extract_wiki_links("https://evilwikipedia.org/wiki/X"), []
-        )
+        self.assertEqual(extract_wiki_links("https://evilwikipedia.org/wiki/X"), [])
 
     def test_rejects_missing_dot_boundary_suffix(self):
         self.assertEqual(
